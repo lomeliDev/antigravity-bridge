@@ -499,41 +499,77 @@ def _is_claude_model(model_id: str) -> bool:
     return model_id.lower().startswith("claude-")
 
 
-def _normalize_tool_parameters(parameters: Any) -> dict[str, Any]:
-    """Return a Gemini-compatible JSON schema for function parameters.
+# JSON Schema fields that Gemini Function Calling does not accept.
+_UNSUPPORTED_SCHEMA_FIELDS = frozenset({
+    "schema",
+    "strict",
+    "additionalProperties",
+    "exclusiveMinimum",
+    "exclusiveMaximum",
+    "default",
+    "title",
+    "$schema",
+})
 
-    Some clients send {'schema': {...}, 'strict': True, ...} instead of a
-    plain JSON schema. Gemini expects the schema directly under 'parameters',
-    so we unwrap 'schema' and strip unsupported fields.
+# Composite keywords whose sub-schemas also need cleaning.
+_COMPOSITE_KEYS = ("anyOf", "allOf", "oneOf", "any_of", "all_of", "one_of")
+
+
+def _clean_gemini_schema(obj: Any) -> Any:
+    """Recursively strip unsupported JSON Schema fields for Gemini.
+
+    Gemini accepts a subset of JSON Schema. Fields such as 'schema',
+    'strict', 'additionalProperties', 'exclusiveMinimum',
+    'exclusiveMaximum', etc. make the request fail with 400.
     """
+    if isinstance(obj, dict):
+        # Unwrap a nested 'schema' key if it is the only schema content.
+        if "schema" in obj and isinstance(obj["schema"], dict):
+            obj = obj["schema"]
+
+        cleaned: dict[str, Any] = {}
+        for key, value in obj.items():
+            if key in _UNSUPPORTED_SCHEMA_FIELDS:
+                continue
+            if key == "properties" and isinstance(value, dict):
+                cleaned[key] = {
+                    prop: _clean_gemini_schema(sub)
+                    for prop, sub in value.items()
+                }
+            elif key == "items":
+                cleaned[key] = _clean_gemini_schema(value)
+            elif key in _COMPOSITE_KEYS and isinstance(value, list):
+                cleaned[key] = [_clean_gemini_schema(item) for item in value]
+            else:
+                cleaned[key] = value
+
+        if cleaned.get("type") == "object" and "properties" not in cleaned:
+            cleaned["properties"] = {}
+        if "type" not in cleaned and "properties" in cleaned:
+            cleaned["type"] = "object"
+        return cleaned
+
+    if isinstance(obj, list):
+        return [_clean_gemini_schema(item) for item in obj]
+
+    return obj
+
+
+def _normalize_tool_parameters(parameters: Any) -> dict[str, Any]:
+    """Return a Gemini-compatible JSON schema for function parameters."""
     if not isinstance(parameters, dict):
         return {"type": "object", "properties": {}}
 
-    # Unwrap nested schema if present.
-    if isinstance(parameters.get("schema"), dict):
-        parameters = parameters["schema"]
+    parameters = _clean_gemini_schema(parameters)
+    if not isinstance(parameters, dict):
+        return {"type": "object", "properties": {}}
 
-    # Build a clean schema object. Gemini only reliably supports type,
-    # properties, required, description, enum and items.
-    clean: dict[str, Any] = {"type": parameters.get("type", "object")}
-    if "properties" in parameters:
-        clean["properties"] = parameters["properties"]
-    if "required" in parameters:
-        clean["required"] = parameters["required"]
-    if "description" in parameters:
-        clean["description"] = parameters["description"]
-    if "items" in parameters:
-        clean["items"] = parameters["items"]
-    if "enum" in parameters:
-        clean["enum"] = parameters["enum"]
+    if parameters.get("type") == "object" and "properties" not in parameters:
+        parameters["properties"] = {}
+    if "type" not in parameters:
+        parameters["type"] = "object"
 
-    # Default to object if no properties were supplied.
-    if "type" not in clean:
-        clean["type"] = "object"
-    if clean.get("type") == "object" and "properties" not in clean:
-        clean["properties"] = {}
-
-    return clean
+    return parameters
 
 
 def oai_tools_to_antigravity(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:

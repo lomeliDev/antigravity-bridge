@@ -16,6 +16,19 @@ fi
 # shellcheck disable=SC1091
 source .env
 
+# Ensure the bridge has an API key. If .env does not have one, generate it
+# automatically so clients like Hermes can authenticate.
+if [[ -z "${BRIDGE_API_KEY:-}" ]]; then
+    echo "No BRIDGE_API_KEY found in .env. Generating one ..."
+    NEW_KEY=$(openssl rand -hex 24 2>/dev/null || python3 -c "import secrets; print(secrets.token_hex(24))")
+    echo "BRIDGE_API_KEY=${NEW_KEY}" >> .env
+    chmod 600 .env
+    BRIDGE_API_KEY="${NEW_KEY}"
+    echo "API key saved to .env. Restarting bridge service to pick it up ..."
+    systemctl restart antigravity-bridge 2>/dev/null || true
+    sleep 2
+fi
+
 # Ask with a default value. First argument is the prompt, second is the default.
 ask_with_default() {
     local prompt="$1"
