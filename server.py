@@ -384,9 +384,8 @@ def oai_messages_to_gemini(messages: list[dict[str, Any]]) -> tuple[list[dict[st
             parts: list[dict[str, Any]] = []
             text = content or "(tool call)"
             parts.append({"text": text})
-            # Convert OpenAI tool_calls to Gemini functionCall parts.
-            # Generate synthetic IDs matching the tool_call_id format so
-            # the Antigravity backend can match tool_use ↔ tool_result.
+            # Convert OpenAI tool_calls to Gemini functionCall parts so
+            # the conversation history preserves tool usage for all providers.
             for tc in msg.get("tool_calls", []) or []:
                 if not isinstance(tc, dict):
                     continue
