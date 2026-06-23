@@ -500,15 +500,34 @@ def _is_claude_model(model_id: str) -> bool:
 
 
 # JSON Schema fields that Gemini Function Calling does not accept.
+# Ported from opencode-antigravity-auth's toGeminiSchema() unsupported list.
 _UNSUPPORTED_SCHEMA_FIELDS = frozenset({
-    "schema",
-    "strict",
     "additionalProperties",
-    "exclusiveMinimum",
-    "exclusiveMaximum",
-    "default",
-    "title",
     "$schema",
+    "$id",
+    "$comment",
+    "$ref",
+    "$defs",
+    "definitions",
+    "const",
+    "contentMediaType",
+    "contentEncoding",
+    "if",
+    "then",
+    "else",
+    "not",
+    "patternProperties",
+    "unevaluatedProperties",
+    "unevaluatedItems",
+    "dependentRequired",
+    "dependentSchemas",
+    "propertyNames",
+    "minContains",
+    "maxContains",
+    # OpenAI-specific extras not present in the Gemini/API subset
+    "strict",
+    "title",
+    "schema",
 })
 
 # Composite keywords whose sub-schemas also need cleaning.
@@ -516,22 +535,36 @@ _COMPOSITE_KEYS = ("anyOf", "allOf", "oneOf", "any_of", "all_of", "one_of")
 
 
 def _clean_gemini_schema(obj: Any) -> Any:
-    """Recursively strip unsupported JSON Schema fields for Gemini.
+    """Recursively transform a JSON Schema into a Gemini-compatible schema.
 
-    Gemini accepts a subset of JSON Schema. Fields such as 'schema',
-    'strict', 'additionalProperties', 'exclusiveMinimum',
-    'exclusiveMaximum', etc. make the request fail with 400.
+    Mirrors opencode-antigravity-auth's toGeminiSchema():
+    - Strips fields Gemini rejects (see _UNSUPPORTED_SCHEMA_FIELDS).
+    - Upper-cases string type values (object -> OBJECT).
+    - Recursively cleans properties, items, anyOf/allOf/oneOf.
+    - Filters 'required' to only include keys that exist in 'properties'.
+    - Ensures array schemas have an 'items' field.
     """
     if isinstance(obj, dict):
         # Unwrap a nested 'schema' key if it is the only schema content.
         if "schema" in obj and isinstance(obj["schema"], dict):
             obj = obj["schema"]
 
+        # Collect declared property names so we can validate required entries.
+        property_names: set[str] = set()
+        if isinstance(obj.get("properties"), dict):
+            property_names = {
+                k for k in obj["properties"].keys() if isinstance(k, str)
+            }
+
         cleaned: dict[str, Any] = {}
         for key, value in obj.items():
             if key in _UNSUPPORTED_SCHEMA_FIELDS:
                 continue
-            if key == "properties" and isinstance(value, dict):
+
+            if key == "type" and isinstance(value, str):
+                # Gemini API expects uppercase type names.
+                cleaned[key] = value.upper()
+            elif key == "properties" and isinstance(value, dict):
                 cleaned[key] = {
                     prop: _clean_gemini_schema(sub)
                     for prop, sub in value.items()
@@ -540,13 +573,27 @@ def _clean_gemini_schema(obj: Any) -> Any:
                 cleaned[key] = _clean_gemini_schema(value)
             elif key in _COMPOSITE_KEYS and isinstance(value, list):
                 cleaned[key] = [_clean_gemini_schema(item) for item in value]
+            elif key == "required" and isinstance(value, list):
+                # Only keep required entries that are actually defined in properties.
+                valid = [
+                    r for r in value
+                    if isinstance(r, str) and (not property_names or r in property_names)
+                ]
+                if valid:
+                    cleaned[key] = valid
             else:
                 cleaned[key] = value
 
-        if cleaned.get("type") == "object" and "properties" not in cleaned:
+        # Ensure object schemas have a properties map.
+        if cleaned.get("type") in ("object", "OBJECT") and "properties" not in cleaned:
             cleaned["properties"] = {}
         if "type" not in cleaned and "properties" in cleaned:
-            cleaned["type"] = "object"
+            cleaned["type"] = "OBJECT"
+
+        # Gemini API requires array schemas to declare items.
+        if cleaned.get("type") == "ARRAY" and "items" not in cleaned:
+            cleaned["items"] = {"type": "STRING"}
+
         return cleaned
 
     if isinstance(obj, list):
@@ -558,16 +605,16 @@ def _clean_gemini_schema(obj: Any) -> Any:
 def _normalize_tool_parameters(parameters: Any) -> dict[str, Any]:
     """Return a Gemini-compatible JSON schema for function parameters."""
     if not isinstance(parameters, dict):
-        return {"type": "object", "properties": {}}
+        return {"type": "OBJECT", "properties": {}}
 
     parameters = _clean_gemini_schema(parameters)
     if not isinstance(parameters, dict):
-        return {"type": "object", "properties": {}}
+        return {"type": "OBJECT", "properties": {}}
 
-    if parameters.get("type") == "object" and "properties" not in parameters:
+    if parameters.get("type") in ("object", "OBJECT") and "properties" not in parameters:
         parameters["properties"] = {}
     if "type" not in parameters:
-        parameters["type"] = "object"
+        parameters["type"] = "OBJECT"
 
     return parameters
 
