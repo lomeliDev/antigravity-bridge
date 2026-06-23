@@ -419,32 +419,62 @@ info "Checking MCP runtime dependencies ..."
 MCP_DEPS_OK=true
 
 # uv/uvx — needed by many MCP servers (huggingface, elevenlabs, aws-*, etc.)
-if ! command -v uvx >/dev/null 2>&1 && ! command -v uv >/dev/null 2>&1; then
-    warn "uv/uvx not found. Installing ..."
+# Some MCPs use `uvx` (uvx awslabs.aws-api-mcp-server), others use `uv run` (anti-captcha).
+UV_INSTALLED=false
+if command -v uv >/dev/null 2>&1 && command -v uvx >/dev/null 2>&1; then
+    success "uv + uvx found."
+    UV_INSTALLED=true
+elif command -v uvx >/dev/null 2>&1; then
+    warn "uvx found but 'uv' is missing (some MCPs need 'uv run'). Installing ..."
+elif command -v uv >/dev/null 2>&1; then
+    warn "'uv' found but uvx is missing. Installing ..."
+fi
+
+if [[ "$UV_INSTALLED" != "true" ]]; then
+    # Try pip first
     if .venv/bin/pip install -q uv 2>/dev/null; then
         export PATH="${HOME}/.local/bin:${PATH}"
-        if command -v uvx >/dev/null 2>&1; then
-            success "uv/uvx installed (pip)."
+        if command -v uv >/dev/null 2>&1 && command -v uvx >/dev/null 2>&1; then
+            success "uv + uvx installed (pip)."
+            UV_INSTALLED=true
         fi
     fi
     # Fallback: official installer
-    if ! command -v uvx >/dev/null 2>&1; then
-        info "pip install failed, trying official installer ..."
+    if [[ "$UV_INSTALLED" != "true" ]]; then
+        info "Trying official installer ..."
         if curl -LsSf https://astral.sh/uv/install.sh | sh 2>/dev/null; then
             export PATH="${HOME}/.local/bin:${PATH}"
-            if command -v uvx >/dev/null 2>&1; then
-                success "uv/uvx installed (official)."
+            if command -v uv >/dev/null 2>&1 && command -v uvx >/dev/null 2>&1; then
+                success "uv + uvx installed (official)."
+                UV_INSTALLED=true
             fi
         fi
     fi
-    if ! command -v uvx >/dev/null 2>&1; then
-        warn "Could not install uv/uvx automatically."
-        warn "MCP servers that depend on it will fail to connect."
-        warn "Install manually: curl -LsSf https://astral.sh/uv/install.sh | sh"
-        MCP_DEPS_OK=false
-    fi
+fi
+
+if [[ "$UV_INSTALLED" == "true" ]]; then
+    # Ensure uv/uvx are reachable by the Hermes gateway (which may not
+    # have ~/.local/bin in its PATH).  Symlink to /usr/local/bin if running
+    # as root or if the directory is user-writable.
+    for bin in uv uvx; do
+        src="${HOME}/.local/bin/${bin}"
+        dst="/usr/local/bin/${bin}"
+        if [[ -x "$src" ]] && [[ ! -e "$dst" ]]; then
+            if [[ "$EUID" -eq 0 ]] || [[ -w /usr/local/bin ]]; then
+                ln -sf "$src" "$dst" 2>/dev/null && \
+                    info "Symlinked ${bin} → /usr/local/bin (for Hermes gateway)" || true
+            fi
+        fi
+    done
 else
-    success "uv/uvx found."
+    warn "Could not install uv/uvx automatically."
+    warn "MCP servers that depend on it will fail to connect."
+    warn "Install manually: curl -LsSf https://astral.sh/uv/install.sh | sh"
+    echo ""
+    warn "After manual install, run:"
+    warn "  sudo ln -sf ~/.local/bin/uv /usr/local/bin/uv"
+    warn "  sudo ln -sf ~/.local/bin/uvx /usr/local/bin/uvx"
+    MCP_DEPS_OK=false
 fi
 
 if [[ "$MCP_DEPS_OK" == "false" ]]; then
