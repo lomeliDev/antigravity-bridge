@@ -1007,15 +1007,11 @@ def health():
 
 @app.route("/v1/models")
 def list_models():
-    if err := _check_api_key():
-        return jsonify(err[0]), err[1]
     return jsonify({"object": "list", "data": fetch_available_models()})
 
 
 @app.route("/v1/models/<path:model_id>")
 def get_model(model_id: str):
-    if err := _check_api_key():
-        return jsonify(err[0]), err[1]
     models = fetch_available_models()
     for m in models:
         if m["id"] == model_id:
