@@ -32,6 +32,125 @@ warn()    { echo -e "${YELLOW}⚠${RESET}  $*"; }
 error()   { echo -e "${RED}✖${RESET}  $*"; }
 
 # ---------------------------------------------------------------------------
+# OpenCode / Antigravity prerequisite helpers
+# ---------------------------------------------------------------------------
+OPENCODE_CONFIG="${HOME}/.config/opencode/opencode.json"
+
+print_prereq_help() {
+    echo ""
+    echo -e "${BOLD}Prerequisite steps${RESET}"
+    echo "────────────────────────────────────────────────────────────────"
+    echo "The bridge reuses the Google OAuth session created by OpenCode."
+    echo ""
+    echo "1. Install the OpenCode CLI:"
+    echo "     https://opencode.ai"
+    echo ""
+    echo "2. Add the Antigravity auth plugin to ${OPENCODE_CONFIG}:"
+    echo ""
+    echo '     {'
+    echo '       "plugin": ["opencode-antigravity-auth@latest"]'
+    echo '     }'
+    echo ""
+    echo "3. Authenticate with Google:"
+    echo "     opencode auth login"
+    echo ""
+    echo "   Select  Google  →  OAuth with Google (Antigravity)"
+    echo "   and sign in with the Google account that has Antigravity access."
+    echo ""
+    echo "4. Verify the credential was stored:"
+    echo "     opencode auth list"
+    echo ""
+}
+
+install_opencode_plugin() {
+    local config_path="$1"
+    mkdir -p "$(dirname "$config_path")"
+    if [[ -f "$config_path" ]]; then
+        local backup_path="${config_path}.backup.$(date +%s)"
+        cp "$config_path" "$backup_path"
+        info "Created backup: ${backup_path}"
+        python3 - <<PY
+import json, sys
+path = "${config_path}"
+with open(path, "r") as f:
+    data = json.load(f)
+plugins = data.get("plugin", [])
+if not isinstance(plugins, list):
+    plugins = [plugins]
+if not any("opencode-antigravity-auth" in p for p in plugins):
+    plugins.append("opencode-antigravity-auth@latest")
+    data["plugin"] = plugins
+    with open(path, "w") as f:
+        json.dump(data, f, indent=2)
+        f.write("\n")
+    print("Plugin added.")
+else:
+    print("Plugin already present.")
+PY
+    else
+        cat > "$config_path" <<'EOF'
+{
+  "plugin": ["opencode-antigravity-auth@latest"]
+}
+EOF
+        chmod 600 "$config_path"
+        success "Created ${config_path} with the Antigravity auth plugin."
+    fi
+}
+
+check_opencode_prerequisites() {
+    echo ""
+    echo -e "${BOLD}OpenCode / Antigravity prerequisites${RESET}"
+    echo "────────────────────────────────────────────────────────────────"
+
+    # 1) opencode CLI
+    if ! command -v opencode >/dev/null 2>&1; then
+        error "The 'opencode' CLI was not found."
+        print_prereq_help
+        exit 1
+    fi
+    success "opencode CLI found."
+
+    # 2) opencode-antigravity-auth plugin configured
+    local plugin_ok=false
+    if [[ -f "$OPENCODE_CONFIG" ]]; then
+        if python3 - <<PY
+import json, sys
+path = "${OPENCODE_CONFIG}"
+try:
+    with open(path, "r") as f:
+        data = json.load(f)
+    plugins = data.get("plugin", [])
+    if not isinstance(plugins, list):
+        plugins = [plugins]
+    if any("opencode-antigravity-auth" in p for p in plugins):
+        sys.exit(0)
+except Exception:
+    pass
+sys.exit(1)
+PY
+        then
+            plugin_ok=true
+        fi
+    fi
+
+    if [[ "$plugin_ok" == "true" ]]; then
+        success "opencode-antigravity-auth plugin is configured."
+    else
+        warn "The opencode-antigravity-auth plugin is not configured."
+        info "It is required so OpenCode can authenticate with Antigravity via Google OAuth."
+        read -rp "Install the plugin automatically? [Y/n]: " INSTALL_PLUGIN
+        INSTALL_PLUGIN="${INSTALL_PLUGIN:-Y}"
+        if [[ "$INSTALL_PLUGIN" =~ ^[Yy]$ ]]; then
+            install_opencode_plugin "$OPENCODE_CONFIG"
+        else
+            print_prereq_help
+            exit 1
+        fi
+    fi
+}
+
+# ---------------------------------------------------------------------------
 # Defaults
 # ---------------------------------------------------------------------------
 DEFAULT_PORT=8080
@@ -63,6 +182,8 @@ fi
 # Python check
 # ---------------------------------------------------------------------------
 print_header
+
+check_opencode_prerequisites
 
 info "Detected platform: ${DETECTED_OS} (${DETECTED_INIT})"
 
@@ -112,10 +233,26 @@ done
 if [[ "$CREDENTIALS_OK" == "false" ]]; then
     warn "One or more Antigravity credential files were not found."
     warn "The bridge needs these files to authenticate with Antigravity."
-    read -rp "Continue anyway? [y/N]: " CONTINUE
-    if [[ ! "${CONTINUE:-N}" =~ ^[Yy]$ ]]; then
-        info "Installation cancelled."
-        exit 0
+    print_prereq_help
+    read -rp "Run 'opencode auth login' now? [y/N]: " RUN_LOGIN
+    if [[ "${RUN_LOGIN:-N}" =~ ^[Yy]$ ]]; then
+        opencode auth login
+        # Re-check credentials after login
+        CREDENTIALS_OK=true
+        for i in "${!CRED_LABELS[@]}"; do
+            path="${CRED_PATHS[$i]}"
+            if [[ ! -f "$path" ]]; then
+                warn "Still missing: ${path}"
+                CREDENTIALS_OK=false
+            fi
+        done
+        if [[ "$CREDENTIALS_OK" == "false" ]]; then
+            error "Credentials are still missing after login. Please finish the OAuth flow and rerun the installer."
+            exit 1
+        fi
+    else
+        error "Please complete the OpenCode Antigravity login and rerun the installer."
+        exit 1
     fi
 fi
 
