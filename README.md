@@ -283,7 +283,9 @@ chmod +x scripts/add-to-openclaw.sh
 ./scripts/add-to-openclaw.sh
 ```
 
-You can pass a different provider name and model if you already have other OAuth plugins:
+The script will ask you for a **model id** and a **provider name**. Just press Enter to accept the defaults (`gemini-2.5-flash` and `antigravity-bridge`).
+
+You can also pass them as arguments to skip the prompts:
 
 ```bash
 ./scripts/add-to-openclaw.sh gemini-2.5-flash my-antigravity
@@ -314,7 +316,9 @@ It edits `~/.openclaw/openclaw.json` (creating it if necessary) and adds the bri
 }
 ```
 
-Apply the config and restart the gateway:
+At the end the script asks if you want to apply the config and restart the OpenClaw gateway, and shows the status before and after.
+
+If you skipped the automatic restart, apply the config manually:
 
 ```bash
 openclaw gateway config.apply --file ~/.openclaw/openclaw.json

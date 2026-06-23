@@ -15,8 +15,28 @@ fi
 # shellcheck disable=SC1091
 source .env
 
-DEFAULT_MODEL="${1:-gemini-2.5-flash}"
-PROVIDER_NAME="${2:-antigravity-bridge}"
+# Ask with a default value. First argument is the prompt, second is the default.
+ask_with_default() {
+    local prompt="$1"
+    local default_value="$2"
+    local input
+    read -rp "${prompt} [${default_value}]: " input
+    echo "${input:-$default_value}"
+}
+
+# Use positional arguments if provided; otherwise ask interactively.
+if [[ $# -ge 1 ]]; then
+    DEFAULT_MODEL="$1"
+else
+    DEFAULT_MODEL=$(ask_with_default "Model id" "gemini-2.5-flash")
+fi
+
+if [[ $# -ge 2 ]]; then
+    PROVIDER_NAME="$2"
+else
+    PROVIDER_NAME=$(ask_with_default "Provider name" "antigravity-bridge")
+fi
+
 BASE_URL="http://127.0.0.1:${PORT}/v1"
 
 CONFIG_DIR="${HOME}/.openclaw"
@@ -97,9 +117,37 @@ PY
 echo ""
 echo "✔ OpenClaw provider '${PROVIDER_NAME}' is configured."
 echo ""
-echo "Apply the config and restart the gateway:"
-echo "  openclaw gateway config.apply --file ${CONFIG_PATH}"
-echo ""
 echo "Then select the model in chat:"
 echo "  /model ${DEFAULT_MODEL}"
+echo ""
+
+# Apply config and restart OpenClaw gateway so it picks up the new provider.
+read -rp "Apply OpenClaw config and restart the gateway now? [Y/n]: " RESTART_ANSWER
+RESTART_ANSWER="${RESTART_ANSWER:-Y}"
+if [[ "$RESTART_ANSWER" =~ ^[Yy] ]]; then
+    echo ""
+    echo "OpenClaw gateway status BEFORE restart:"
+    systemctl status openclaw-gateway --no-pager 2>/dev/null || true
+
+    echo ""
+    echo "Applying OpenClaw config ..."
+    openclaw gateway config.apply --file "${CONFIG_PATH}" || true
+
+    echo ""
+    echo "Restarting OpenClaw gateway ..."
+    if systemctl restart openclaw-gateway 2>/dev/null; then
+        echo "OpenClaw gateway restarted."
+    else
+        echo "Could not restart 'openclaw-gateway' via systemctl."
+        echo "Please restart it manually with your OpenClaw management command."
+    fi
+
+    echo ""
+    echo "OpenClaw gateway status AFTER restart:"
+    systemctl status openclaw-gateway --no-pager 2>/dev/null || true
+else
+    echo "Skipped OpenClaw gateway restart. Apply the config manually with:"
+    echo "  openclaw gateway config.apply --file ${CONFIG_PATH}"
+fi
+
 echo ""
