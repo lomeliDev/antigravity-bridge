@@ -17,8 +17,28 @@ fi
 # shellcheck disable=SC1091
 source .env
 
-DEFAULT_MODEL="${1:-gemini-2.5-flash}"
-PROVIDER_NAME="${2:-antigravity-bridge}"
+# Ask with a default value. First argument is the prompt, second is the default.
+ask_with_default() {
+    local prompt="$1"
+    local default_value="$2"
+    local input
+    read -rp "${prompt} [${default_value}]: " input
+    echo "${input:-$default_value}"
+}
+
+# Use positional arguments if provided; otherwise ask interactively.
+if [[ $# -ge 1 ]]; then
+    DEFAULT_MODEL="$1"
+else
+    DEFAULT_MODEL=$(ask_with_default "Model id" "gemini-2.5-flash")
+fi
+
+if [[ $# -ge 2 ]]; then
+    PROVIDER_NAME="$2"
+else
+    PROVIDER_NAME=$(ask_with_default "Provider name" "antigravity-bridge")
+fi
+
 BASE_URL="http://127.0.0.1:${PORT}/v1"
 
 if ! command -v hermes >/dev/null 2>&1; then

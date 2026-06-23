@@ -238,7 +238,9 @@ chmod +x scripts/add-to-hermes.sh
 ./scripts/add-to-hermes.sh
 ```
 
-You can pass a different provider name if you already have other OAuth plugins:
+The script will ask you for a **model id** and a **provider name**. Just press Enter to accept the defaults (`gemini-2.5-flash` and `antigravity-bridge`).
+
+You can also pass them as arguments to skip the prompts:
 
 ```bash
 ./scripts/add-to-hermes.sh gemini-2.5-flash my-antigravity
