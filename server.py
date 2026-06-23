@@ -103,7 +103,7 @@ class Auth:
                     acct = accts[0]
                     self._email = acct.get("email")
                     rt = acct.get("refreshToken") or acct.get("refresh_token") or ""
-                    self._refresh_token = rt.rstrip("|")
+                    self._refresh_token = rt.strip("|")
                     fp = acct.get("fingerprint") or {}
                     cm = fp.get("clientMetadata") or {}
                     self._user_agent = fp.get("userAgent", self._user_agent)
@@ -373,12 +373,43 @@ def oai_messages_to_gemini(messages: list[dict[str, Any]]) -> tuple[list[dict[st
                     p.get("text", "") for p in content
                     if isinstance(p, dict) and p.get("type") == "text"
                 )
-            contents.append({"role": "model", "parts": [{"text": content or " "}]})
+            parts: list[dict[str, Any]] = []
+            text = content or "(tool call)"
+            parts.append({"text": text})
+            # Convert OpenAI tool_calls to Gemini functionCall parts so
+            # the conversation history preserves tool usage for all providers.
+            for tc in msg.get("tool_calls", []) or []:
+                if not isinstance(tc, dict):
+                    continue
+                fn = tc.get("function", {})
+                if not isinstance(fn, dict):
+                    continue
+                name = fn.get("name", "")
+                args_str = fn.get("arguments", "{}")
+                try:
+                    args = json.loads(args_str) if isinstance(args_str, str) else args_str
+                except Exception:
+                    args = args_str
+                fc: dict[str, Any] = {"name": name, "args": args}
+                # Preserve the tool_call id so Claude/Anthropic can match
+                # tool_use <-> tool_result pairs when the backend translates.
+                if tc.get("id"):
+                    fc["id"] = tc["id"]
+                parts.append({"functionCall": fc})
+            contents.append({"role": "model", "parts": parts})
         elif role == "tool":
             tid = msg.get("tool_call_id", "")
             name = msg.get("name") or tool_names.get(tid) or "unknown"
             response = _tool_result_to_response(content)
-            contents.append({"role": "user", "parts": [{"functionResponse": {"name": name, "response": response}}]})
+            fr: dict[str, Any] = {"name": name, "response": response}
+            if tid:
+                fr["id"] = tid
+            # Include a non-whitespace text part for providers (Claude) that
+            # require at least one text content block alongside tool results.
+            contents.append({"role": "user", "parts": [
+                {"text": "Tool result:"},
+                {"functionResponse": fr},
+            ]})
         elif role == "function":
             # Legacy OpenAI function result format.
             name = msg.get("name") or "unknown"
@@ -403,13 +434,20 @@ def _apply_response_format(body: dict[str, Any], generation_config: dict[str, An
 
 
 def _model_max_output_tokens(model_id: str) -> int:
-    """Return the max output tokens for known Gemini models."""
+    """Return the max output tokens for known models.
+    Flash models: 8192. Gemini Pro/thinking: 65536. Claude/GPT: 8192."""
     mid = (model_id or "").lower()
-    if "flash" in mid and "thinking" not in mid:
+    # Claude models: cap at 8192 regardless of name
+    if "claude" in mid:
         return 8192
-    if "flash-thinking" in mid or "thinking" in mid:
-        return 65536
-    if "pro" in mid:
+    # GPT/OpenAI models: cap at 8192
+    if "gpt" in mid:
+        return 8192
+    # Gemini flash models (including flash-thinking): 8192
+    if "flash" in mid:
+        return 8192
+    # Gemini pro/thinking models: 65536
+    if "pro" in mid or "thinking" in mid:
         return 65536
     return 8192  # safe default
 
