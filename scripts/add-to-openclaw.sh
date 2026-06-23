@@ -82,8 +82,9 @@ defaults = agents.setdefault("defaults", {})
 agent_models = defaults.setdefault("models", {})
 agent_models[f"{provider_name}/{model}"] = {"alias": model}
 
-backup = path + ".backup"
-if os.path.exists(path) and not os.path.exists(backup):
+import time
+backup = path + ".backup." + str(int(time.time()))
+if os.path.exists(path):
     os.replace(path, backup)
 
 with open(path, "w") as f:
