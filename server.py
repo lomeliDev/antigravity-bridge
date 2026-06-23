@@ -61,7 +61,12 @@ BRIDGE_API_KEY = os.environ.get("BRIDGE_API_KEY")
 ASSIST_URL = "https://cloudcode-pa.googleapis.com/v1internal"
 TOKEN_URL = "https://oauth2.googleapis.com/token"
 
-# Fallback static model list, used when the dynamic fetch fails.
+# Models that are known to be broken through the Antigravity API.
+# These are filtered from the /v1/models listing to avoid confusing users.
+_BROKEN_MODELS: frozenset[str] = frozenset({
+    "gemini-2.5-pro",       # 503 "No capacity" — consistently unavailable
+    "gemini-3.1-pro-high",  # 400 INVALID_ARGUMENT — unsupported by API
+})
 MODELS: list[dict[str, Any]] = [
     {"id": "gemini-2.5-pro",             "object": "model", "owned_by": "google", "created": 1735689600},
     {"id": "gemini-2.5-flash",           "object": "model", "owned_by": "google", "created": 1735776000},
@@ -255,6 +260,9 @@ def fetch_available_models() -> list[dict[str, Any]]:
             # Skip internal experiment IDs that are not public chat models.
             if model_id.startswith(("chat_", "tab_")):
                 continue
+            # Filter models that are known to be broken via this API.
+            if model_id in _BROKEN_MODELS:
+                continue
             models.append({
                 "id": model_id,
                 "object": "model",
@@ -376,8 +384,9 @@ def oai_messages_to_gemini(messages: list[dict[str, Any]]) -> tuple[list[dict[st
             parts: list[dict[str, Any]] = []
             text = content or "(tool call)"
             parts.append({"text": text})
-            # Convert OpenAI tool_calls to Gemini functionCall parts so
-            # the conversation history preserves tool usage for all providers.
+            # Convert OpenAI tool_calls to Gemini functionCall parts.
+            # Generate synthetic IDs matching the tool_call_id format so
+            # the Antigravity backend can match tool_use ↔ tool_result.
             for tc in msg.get("tool_calls", []) or []:
                 if not isinstance(tc, dict):
                     continue
@@ -390,12 +399,10 @@ def oai_messages_to_gemini(messages: list[dict[str, Any]]) -> tuple[list[dict[st
                     args = json.loads(args_str) if isinstance(args_str, str) else args_str
                 except Exception:
                     args = args_str
-                fc: dict[str, Any] = {"name": name, "args": args}
-                # Preserve the tool_call id so Claude/Anthropic can match
-                # tool_use <-> tool_result pairs when the backend translates.
-                if tc.get("id"):
-                    fc["id"] = tc["id"]
-                parts.append({"functionCall": fc})
+                fc_id = tc.get("id") or f"call_{uuid.uuid4().hex[:24]}"
+                parts.append({"functionCall": {"name": name, "args": args, "id": fc_id}})
+                # Remember the id for matching tool responses
+                tool_names[fc_id] = name
             contents.append({"role": "model", "parts": parts})
         elif role == "tool":
             tid = msg.get("tool_call_id", "")
@@ -404,12 +411,7 @@ def oai_messages_to_gemini(messages: list[dict[str, Any]]) -> tuple[list[dict[st
             fr: dict[str, Any] = {"name": name, "response": response}
             if tid:
                 fr["id"] = tid
-            # Include a non-whitespace text part for providers (Claude) that
-            # require at least one text content block alongside tool results.
-            contents.append({"role": "user", "parts": [
-                {"text": "Tool result:"},
-                {"functionResponse": fr},
-            ]})
+            contents.append({"role": "user", "parts": [{"functionResponse": fr}]})
         elif role == "function":
             # Legacy OpenAI function result format.
             name = msg.get("name") or "unknown"
@@ -435,18 +437,15 @@ def _apply_response_format(body: dict[str, Any], generation_config: dict[str, An
 
 def _model_max_output_tokens(model_id: str) -> int:
     """Return the max output tokens for known models.
-    Flash models: 8192. Gemini Pro/thinking: 65536. Claude/GPT: 8192."""
+    Flash/lite/low/agent: 8192. Pure Gemini pro/thinking: 65536. Claude/GPT: 8192."""
     mid = (model_id or "").lower()
-    # Claude models: cap at 8192 regardless of name
-    if "claude" in mid:
+    # Claude, GPT, and any "lite"/"low"/"agent" variant: 8192
+    if any(kw in mid for kw in ("claude", "gpt", "lite", "low", "agent")):
         return 8192
-    # GPT/OpenAI models: cap at 8192
-    if "gpt" in mid:
-        return 8192
-    # Gemini flash models (including flash-thinking): 8192
+    # Flash models: 8192
     if "flash" in mid:
         return 8192
-    # Gemini pro/thinking models: 65536
+    # Pure pro/thinking models (no flash, no lite, no low, no agent): 65536
     if "pro" in mid or "thinking" in mid:
         return 65536
     return 8192  # safe default
