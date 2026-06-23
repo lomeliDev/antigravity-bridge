@@ -399,7 +399,7 @@ def _apply_response_format(body: dict[str, Any], generation_config: dict[str, An
         schema = rf.get("json_schema", {}).get("schema")
         if schema:
             generation_config["responseMimeType"] = "application/json"
-            generation_config["responseSchema"] = schema
+            generation_config["responseSchema"] = _clean_gemini_schema(schema)
 
 
 def build_gemini_request(model: str, body: dict[str, Any], contents: list, system_instr: str) -> dict[str, Any]:
@@ -499,7 +499,7 @@ def _is_claude_model(model_id: str) -> bool:
     return model_id.lower().startswith("claude-")
 
 
-# JSON Schema fields that Gemini Function Calling does not accept.
+# JSON Schema fields that Gemini Function Calling rejects outright.
 # Ported from opencode-antigravity-auth's toGeminiSchema() unsupported list.
 _UNSUPPORTED_SCHEMA_FIELDS = frozenset({
     "additionalProperties",
@@ -509,7 +509,6 @@ _UNSUPPORTED_SCHEMA_FIELDS = frozenset({
     "$ref",
     "$defs",
     "definitions",
-    "const",
     "contentMediaType",
     "contentEncoding",
     "if",
@@ -530,24 +529,183 @@ _UNSUPPORTED_SCHEMA_FIELDS = frozenset({
     "schema",
 })
 
+# Constraint fields that Gemini rejects but whose meaning we preserve as a
+# description hint (matches the original plugin's moveConstraintsToDescription).
+_CONSTRAINT_FIELDS = frozenset({
+    "minLength",
+    "maxLength",
+    "exclusiveMinimum",
+    "exclusiveMaximum",
+    "pattern",
+    "minItems",
+    "maxItems",
+    "format",
+    "multipleOf",
+})
+
 # Composite keywords whose sub-schemas also need cleaning.
 _COMPOSITE_KEYS = ("anyOf", "allOf", "oneOf", "any_of", "all_of", "one_of")
+
+_EMPTY_SCHEMA_PLACEHOLDER = "_placeholder"
+_EMPTY_SCHEMA_DESCRIPTION = "Placeholder. Always pass true."
+
+
+def _add_description_hint(schema: dict[str, Any], hint: str) -> dict[str, Any]:
+    """Append an informational hint to a schema's description field."""
+    existing = schema.get("description", "")
+    if existing:
+        schema["description"] = f"{existing} ({hint})"
+    else:
+        schema["description"] = hint
+    return schema
+
+
+def _move_constraint_to_description(
+    schema: dict[str, Any], key: str, value: Any
+) -> dict[str, Any]:
+    """Turn a rejected constraint keyword into a description hint."""
+    if key in ("minLength", "maxLength", "minItems", "maxItems", "multipleOf"):
+        hint = f"{key}: {value}"
+    elif key in ("minimum", "maximum"):
+        hint = f"{key}: {value}"
+    elif key in ("exclusiveMinimum", "exclusiveMaximum"):
+        hint = f"{key}: {value}"
+    elif key == "pattern":
+        hint = f"pattern: {value}"
+    elif key == "format":
+        hint = f"format: {value}"
+    else:
+        hint = f"{key}: {value}"
+    return _add_description_hint(schema, hint)
+
+
+def _convert_const_to_enum(schema: dict[str, Any]) -> dict[str, Any]:
+    """Convert { const: x } -> { enum: [x] } so the value is not lost."""
+    if "const" in schema and "enum" not in schema:
+        schema = dict(schema)
+        schema["enum"] = [schema.pop("const")]
+    return schema
+
+
+def _flatten_type_array(schema: dict[str, Any]) -> dict[str, Any]:
+    """Flatten type arrays like ['string', 'null'] to a single type + hint."""
+    t = schema.get("type")
+    if not isinstance(t, list):
+        return schema
+    non_null = [x for x in t if x != "null"]
+    if len(non_null) == 1:
+        schema = dict(schema)
+        schema["type"] = non_null[0]
+        schema = _add_description_hint(schema, "nullable")
+    elif len(non_null) > 1:
+        schema = dict(schema)
+        schema["type"] = non_null[0]
+        schema = _add_description_hint(schema, f"types: {', '.join(non_null)}")
+    return schema
+
+
+def _merge_allof(schema: dict[str, Any]) -> dict[str, Any]:
+    """Merge allOf branches into a single object schema."""
+    allof = schema.get("allOf")
+    if not isinstance(allof, list) or not allof:
+        return schema
+    merged: dict[str, Any] = {}
+    required: list[str] = []
+    for sub in allof:
+        if not isinstance(sub, dict):
+            continue
+        for k, v in sub.items():
+            if k == "properties" and isinstance(v, dict):
+                merged.setdefault("properties", {})
+                merged["properties"].update(v)
+            elif k == "required" and isinstance(v, list):
+                required.extend(v)
+            elif k not in merged:
+                merged[k] = v
+    # Top-level schema wins over allOf branches.
+    for k, v in schema.items():
+        if k == "allOf":
+            continue
+        if k == "properties" and isinstance(v, dict):
+            merged.setdefault("properties", {})
+            merged["properties"].update(v)
+        elif k == "required" and isinstance(v, list):
+            required.extend(v)
+        else:
+            merged[k] = v
+    if required:
+        merged["required"] = list(dict.fromkeys(required))
+    return merged
+
+
+def _flatten_anyof_oneof(schema: dict[str, Any]) -> dict[str, Any]:
+    """Detect const/enum-of-consts or nullable type unions in anyOf/oneOf."""
+    for key in ("anyOf", "oneOf"):
+        branches = schema.get(key)
+        if not isinstance(branches, list) or not branches:
+            continue
+
+        # Pattern: [{const: a}, {const: b}, ...] -> enum: [a, b]
+        consts: list[Any] = []
+        for b in branches:
+            if isinstance(b, dict) and "const" in b:
+                consts.append(b["const"])
+            elif (
+                isinstance(b, dict)
+                and isinstance(b.get("enum"), list)
+                and len(b["enum"]) == 1
+            ):
+                consts.append(b["enum"][0])
+        if consts and len(consts) == len(branches):
+            schema = dict(schema)
+            schema.pop(key)
+            schema["enum"] = consts
+            return schema
+
+        # Pattern: [{type: "string"}, {type: "null"}] -> type: "string" + nullable hint
+        types = [
+            b["type"]
+            for b in branches
+            if isinstance(b, dict) and isinstance(b.get("type"), str)
+        ]
+        if types and len(types) == len(branches) and "null" in types:
+            schema = dict(schema)
+            schema.pop(key)
+            non_null = [t for t in types if t != "null"]
+            if len(non_null) == 1:
+                schema["type"] = non_null[0]
+                schema = _add_description_hint(schema, "nullable")
+            elif len(non_null) > 1:
+                schema["type"] = non_null[0]
+                schema = _add_description_hint(schema, f"types: {', '.join(non_null)}")
+            return schema
+
+    return schema
 
 
 def _clean_gemini_schema(obj: Any) -> Any:
     """Recursively transform a JSON Schema into a Gemini-compatible schema.
 
-    Mirrors opencode-antigravity-auth's toGeminiSchema():
+    Mirrors the original opencode-antigravity-auth pipeline:
     - Strips fields Gemini rejects (see _UNSUPPORTED_SCHEMA_FIELDS).
-    - Upper-cases string type values (object -> OBJECT).
-    - Recursively cleans properties, items, anyOf/allOf/oneOf.
+    - Preserves constraint semantics as description hints.
+    - Converts const -> enum, merges allOf, flattens anyOf/oneOf unions.
+    - Flattens type arrays and upper-cases type names.
     - Filters 'required' to only include keys that exist in 'properties'.
     - Ensures array schemas have an 'items' field.
+    - Injects a placeholder for empty object schemas.
     """
     if isinstance(obj, dict):
         # Unwrap a nested 'schema' key if it is the only schema content.
         if "schema" in obj and isinstance(obj["schema"], dict):
             obj = obj["schema"]
+
+        # Structural normalizations (do these before recursive cleaning so the
+        # resulting shape is simpler).
+        obj = _convert_const_to_enum(obj)
+        obj = _merge_allof(obj)
+        obj = _flatten_anyof_oneof(obj)
+        obj = _flatten_type_array(obj)
 
         # Collect declared property names so we can validate required entries.
         property_names: set[str] = set()
@@ -557,13 +715,27 @@ def _clean_gemini_schema(obj: Any) -> Any:
             }
 
         cleaned: dict[str, Any] = {}
+        # Seed description first so constraint hints append to it rather than
+        # being overwritten when the original description is processed later.
+        if isinstance(obj.get("description"), str):
+            cleaned["description"] = obj["description"]
+
         for key, value in obj.items():
             if key in _UNSUPPORTED_SCHEMA_FIELDS:
+                continue
+
+            if key in _CONSTRAINT_FIELDS or key in ("minimum", "maximum"):
+                # Preserve the constraint meaning as a description hint.
+                cleaned = _move_constraint_to_description(cleaned, key, value)
                 continue
 
             if key == "type" and isinstance(value, str):
                 # Gemini API expects uppercase type names.
                 cleaned[key] = value.upper()
+            elif key == "description":
+                # Already seeded above; don't overwrite it with hints appended.
+                if "description" not in cleaned:
+                    cleaned[key] = value
             elif key == "properties" and isinstance(value, dict):
                 cleaned[key] = {
                     prop: _clean_gemini_schema(sub)
@@ -574,7 +746,6 @@ def _clean_gemini_schema(obj: Any) -> Any:
             elif key in _COMPOSITE_KEYS and isinstance(value, list):
                 cleaned[key] = [_clean_gemini_schema(item) for item in value]
             elif key == "required" and isinstance(value, list):
-                # Only keep required entries that are actually defined in properties.
                 valid = [
                     r for r in value
                     if isinstance(r, str) and (not property_names or r in property_names)
@@ -589,6 +760,22 @@ def _clean_gemini_schema(obj: Any) -> Any:
             cleaned["properties"] = {}
         if "type" not in cleaned and "properties" in cleaned:
             cleaned["type"] = "OBJECT"
+
+        # Empty object schemas need a placeholder property.
+        if (
+            cleaned.get("type") == "OBJECT"
+            and isinstance(cleaned.get("properties"), dict)
+            and not cleaned["properties"]
+        ):
+            cleaned["properties"] = {
+                _EMPTY_SCHEMA_PLACEHOLDER: {
+                    "type": "BOOLEAN",
+                    "description": _EMPTY_SCHEMA_DESCRIPTION,
+                }
+            }
+            cleaned.setdefault("required", [])
+            if _EMPTY_SCHEMA_PLACEHOLDER not in cleaned["required"]:
+                cleaned["required"].append(_EMPTY_SCHEMA_PLACEHOLDER)
 
         # Gemini API requires array schemas to declare items.
         if cleaned.get("type") == "ARRAY" and "items" not in cleaned:
