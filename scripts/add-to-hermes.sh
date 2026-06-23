@@ -82,9 +82,13 @@ if api_key:
 custom_providers.append(provider)
 
 # Set active model to the named custom provider.
+# Remove any stale top-level base_url/api_key that may be left over from a
+# previous provider, because Hermes ignores them when using custom:<name>.
 model_section = data.setdefault("model", {})
 model_section["provider"] = f"custom:{provider_name}"
 model_section["default"] = model
+model_section.pop("base_url", None)
+model_section.pop("api_key", None)
 
 with open(config_path, "w") as f:
     yaml.dump(data, f, default_flow_style=False, sort_keys=False, allow_unicode=True)
@@ -95,6 +99,10 @@ PY
 echo ""
 echo "✔ Hermes is now configured with provider 'custom:${PROVIDER_NAME}'."
 echo ""
-echo "Start Hermes and switch models with:"
+echo "Restart Hermes so it reads the new config:"
+echo "  hermes gateway restart     # if you use the gateway"
+echo "  # or close and reopen Hermes if you use the CLI/TUI"
+echo ""
+echo "Then switch models with:"
 echo "  /model custom:${PROVIDER_NAME}:${DEFAULT_MODEL}"
 echo ""
