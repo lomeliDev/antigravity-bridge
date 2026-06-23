@@ -113,16 +113,34 @@ custom_providers.append({
     **({"api_key": api_key} if api_key else {}),
 })
 
+model_section = data.setdefault("model", {})
 if set_active:
-    model_section = data.setdefault("model", {})
     model_section["provider"] = provider_name
     model_section["default"] = model
-    # Remove stale global custom base_url/api_key that would override the provider.
-    model_section.pop("base_url", None)
-    model_section.pop("api_key", None)
+
+# If the active provider points to our named provider, remove any stale
+# global custom base_url/api_key. Hermes sometimes auto-fills OpenRouter's
+# URL here when the provider name is 'custom' or the model is not found.
+if model_section.get("provider") == provider_name:
+    removed = []
+    for key in ("base_url", "api_key"):
+        if key in model_section:
+            del model_section[key]
+            removed.append(key)
+    if removed:
+        print(f"Removed stale model.{', '.join(removed)} so provider '{provider_name}' is used")
 
 with open(config_path, "w") as f:
     yaml.dump(data, f, default_flow_style=False, sort_keys=False, allow_unicode=True)
+
+# Verify the final config and warn about common misconfigurations.
+final_provider = model_section.get("provider")
+final_base_url = model_section.get("base_url", "")
+if final_provider != provider_name:
+    print(f"WARNING: model.provider is '{final_provider}', not '{provider_name}'.")
+if "openrouter" in str(final_base_url).lower():
+    print(f"WARNING: model.base_url still points to OpenRouter ({final_base_url}).")
+    print("         Remove it manually or the bridge will not be used.")
 
 print(f"Updated {config_path}")
 PY

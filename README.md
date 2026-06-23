@@ -272,7 +272,7 @@ hermes gateway restart     # if you use the Hermes gateway
 # or close and reopen Hermes if you use the CLI/TUI
 ```
 
-> **Important:** if the status bar still shows a different provider (for example `Nous Research`), Hermes is using another endpoint (such as OpenRouter). Make sure `model.provider` points to `antigravity-bridge` and that `model.base_url` is not set to a different service.
+> **Important:** Hermes sometimes auto-fills `model.base_url` with `https://openrouter.ai/api/v1` when it cannot resolve the selected model. If this happens, the bridge is not being used. Make sure `model.provider` points to `antigravity-bridge` and that `model.base_url` is empty/removed.
 
 If you prefer not to activate the bridge immediately, answer `n` when the script asks. You can switch later with:
 
