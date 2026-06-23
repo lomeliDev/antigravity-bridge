@@ -324,8 +324,6 @@ DEFAULT_ANTIGRAVITY_CONST="${ANTIGRAVITY_CONST:-$HOME/.cache/opencode/packages/o
 DEFAULT_ANTIGRAVITY_ACCOUNTS="${ANTIGRAVITY_ACCOUNTS:-$HOME/.config/opencode/antigravity-accounts.json}"
 DEFAULT_ANTIGRAVITY_AUTH="${ANTIGRAVITY_AUTH:-$HOME/.local/share/opencode/auth.json}"
 
-CREDENTIALS_OK=true
-
 # ---------------------------------------------------------------------------
 # Platform detection
 # ---------------------------------------------------------------------------
@@ -345,7 +343,7 @@ elif [[ "$OSTYPE" == "darwin"* ]]; then
 fi
 
 # ---------------------------------------------------------------------------
-# Python check
+# Main flow
 # ---------------------------------------------------------------------------
 print_header
 
@@ -353,6 +351,9 @@ check_opencode_prerequisites
 
 info "Detected platform: ${DETECTED_OS} (${DETECTED_INIT})"
 
+# ---------------------------------------------------------------------------
+# Python check
+# ---------------------------------------------------------------------------
 if ! command -v python3 >/dev/null 2>&1; then
     error "python3 was not found. Please install Python 3.10 or newer and try again."
     exit 1
@@ -586,9 +587,9 @@ fi
 # ---------------------------------------------------------------------------
 run_tests() {
     local base_url="http://127.0.0.1:${PORT}"
-    local auth_header=""
+    local curl_auth=()
     if [[ -n "$API_KEY" ]]; then
-        auth_header="-H Authorization: Bearer ${API_KEY}"
+        curl_auth=(-H "Authorization: Bearer ${API_KEY}")
     fi
 
     echo ""
@@ -605,10 +606,10 @@ run_tests() {
 
     info "Testing /health ..."
     local health_status
-    health_status=$(curl -s -o /dev/null -w "%{http_code}" $auth_header "$base_url/health" 2>/dev/null || true)
+    health_status=$(curl -s -o /dev/null -w "%{http_code}" "${curl_auth[@]}" "$base_url/health" 2>/dev/null || true)
     if [[ "$health_status" == "200" ]]; then
         success "/health returned 200."
-        curl -s $auth_header "$base_url/health" | sed 's/^/     /'
+        curl -s "${curl_auth[@]}" "$base_url/health" | sed 's/^/     /'
     else
         error "/health returned ${health_status:-no response}."
         return 1
@@ -616,7 +617,7 @@ run_tests() {
 
     info "Testing /v1/models ..."
     local models_status
-    models_status=$(curl -s -o /dev/null -w "%{http_code}" $auth_header "$base_url/v1/models" 2>/dev/null || true)
+    models_status=$(curl -s -o /dev/null -w "%{http_code}" "${curl_auth[@]}" "$base_url/v1/models" 2>/dev/null || true)
     if [[ "$models_status" == "200" ]]; then
         success "/v1/models returned 200."
     else
