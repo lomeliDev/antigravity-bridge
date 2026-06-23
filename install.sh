@@ -78,6 +78,9 @@ print_prereq_help() {
     echo "6. Verify the credential was stored:"
     echo "     opencode auth list"
     echo ""
+    echo "Then re-run this installer:"
+    echo "     ./install.sh"
+    echo ""
 }
 
 install_opencode() {
@@ -92,8 +95,9 @@ install_opencode() {
     curl -fsSL https://opencode.ai/install | bash
     export PATH="${HOME}/.opencode/bin:${HOME}/.local/bin:${PATH}"
     if ! command -v opencode >/dev/null 2>&1; then
-        error "OpenCode installation failed or is not on PATH."
-        error "Try opening a new terminal or adding ${HOME}/.opencode/bin to PATH."
+        error "OpenCode was installed but is not on PATH in this shell."
+        error "Run this command in a new terminal, then re-run the installer:"
+        error "  export PATH=\"${HOME}/.opencode/bin:\${HOME}/.local/bin:\${PATH}\""
         exit 1
     fi
     success "OpenCode installed."
@@ -111,8 +115,9 @@ install_antigravity_cli() {
     curl -fsSL https://antigravity.google/cli/install.sh | bash
     export PATH="${HOME}/.local/bin:${PATH}"
     if ! command -v "$ANTIGRAVITY_CLI_BIN" >/dev/null 2>&1; then
-        error "Antigravity CLI installation failed or is not on PATH."
-        error "Try opening a new terminal or adding ${HOME}/.local/bin to PATH."
+        error "Antigravity CLI was installed but is not on PATH in this shell."
+        error "Run this command in a new terminal, then re-run the installer:"
+        error "  export PATH=\"${HOME}/.local/bin:\${PATH}\""
         exit 1
     fi
     success "Antigravity CLI installed."
@@ -204,9 +209,10 @@ run_interactive_login() {
     local tool="$1"
     local cmd="$2"
     echo ""
+    warn "A browser tab will open so you can authenticate with Google."
+    warn "Do NOT close this terminal until the login finishes and you return here."
     info "The installer will now run: ${cmd}"
-    info "Follow the browser / terminal prompts to authenticate, then come back here."
-    read -rp "Press Enter to start the login ..."
+    read -rp "Press Enter to open the login page ..."
     $cmd || true
 }
 
@@ -233,6 +239,7 @@ check_opencode_prerequisites() {
         success "An agy session was detected."
     else
         warn "No agy session was detected. The installer can run 'agy login' for you now."
+        warn "If you skip this, the installer will exit and you can re-run it later."
         read -rp "Run 'agy login' now? [Y/n]: " RUN_AGY_LOGIN
         RUN_AGY_LOGIN="${RUN_AGY_LOGIN:-Y}"
         if [[ "$RUN_AGY_LOGIN" =~ ^[Yy]$ ]]; then
@@ -277,6 +284,7 @@ check_opencode_prerequisites() {
         success "OpenCode Google OAuth credential found."
     else
         warn "No OpenCode Google OAuth credential found. The installer can run 'opencode auth login' for you now."
+        warn "If you skip this, the installer will exit and you can re-run it later."
         read -rp "Run 'opencode auth login' now? [Y/n]: " RUN_OPENCODE_LOGIN
         RUN_OPENCODE_LOGIN="${RUN_OPENCODE_LOGIN:-Y}"
         if [[ "$RUN_OPENCODE_LOGIN" =~ ^[Yy]$ ]]; then
@@ -346,6 +354,28 @@ fi
 # Main flow
 # ---------------------------------------------------------------------------
 print_header
+
+if [[ "$EUID" -eq 0 ]]; then
+    warn "You are running this installer as root."
+    warn "The bridge and the service will be configured for the root user."
+    read -rp "Continue as root? [y/N]: " CONTINUE_ROOT
+    if [[ ! "${CONTINUE_ROOT:-N}" =~ ^[Yy]$ ]]; then
+        info "Please run the installer as your normal user and try again."
+        exit 0
+    fi
+fi
+
+echo ""
+echo -e "${BOLD}What this script will do${RESET}"
+echo "────────────────────────────────────────────────────────────────"
+echo "  1. Install OpenCode and the Antigravity CLI if they are missing."
+echo "  2. Run the OAuth logins for you (browser tabs will open)."
+echo "  3. Install the bridge and its Python dependencies."
+echo "  4. Ask for a port and an optional API key."
+echo "  5. Install and start a system service (systemd / launchd)."
+echo ""
+echo -e "${CYAN}Just press Enter to accept the defaults when prompted.${RESET}"
+echo ""
 
 check_opencode_prerequisites
 
@@ -652,6 +682,9 @@ else
     info "API key:           (none / no client auth)"
 fi
 
+info "Check the logs:"
+echo "     tail -f ${REPO_DIR}/bridge.log"
+
 if [[ "$DETECTED_INIT" == "systemd" ]]; then
     info "Manage the service:"
     echo "     sudo systemctl status antigravity-bridge"
@@ -666,6 +699,9 @@ else
     info "Start manually:"
     echo "     ${DAEMON_DIR}/run.sh"
 fi
+
+info "Test the bridge:"
+echo "     curl -s http://127.0.0.1:${PORT}/health | jq"
 
 echo ""
 echo -e "${CYAN}Happy bridging!${RESET}"
