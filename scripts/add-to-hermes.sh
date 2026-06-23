@@ -229,7 +229,8 @@ if [[ "$RESTART_ANSWER" =~ ^[Yy] ]]; then
     fi
 
     # 4) Any remaining TUI sessions — notify the user, don't kill them
-    TUI_COUNT=$(pgrep -cf "tui_gateway\|ui-tui" 2>/dev/null || echo 0)
+    TUI_COUNT=$(pgrep -f "tui_gateway" 2>/dev/null | wc -l)
+    TUI_COUNT=$((TUI_COUNT + $(pgrep -f "ui-tui" 2>/dev/null | wc -l)))
     if [[ "$TUI_COUNT" -gt 0 ]]; then
         echo "  TUI      ... ⚠ $TUI_COUNT session(s) still running — close/reopen them to pick up the new provider"
     else
