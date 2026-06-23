@@ -115,10 +115,35 @@ PY
 echo ""
 echo "✔ Hermes now knows the provider 'custom:${PROVIDER_NAME}'."
 echo ""
-echo "Restart Hermes so it reads the new config:"
-echo "  hermes gateway restart     # if you use the gateway"
-echo "  # or close and reopen Hermes if you use the CLI/TUI"
-echo ""
 echo "Then choose the provider/model in the Hermes panel, or run:"
 echo "  /model custom:${PROVIDER_NAME}:${DEFAULT_MODEL}"
+echo ""
+
+# Restart Hermes gateway so it picks up the new custom provider.
+read -rp "Restart Hermes gateway now? [Y/n]: " RESTART_ANSWER
+RESTART_ANSWER="${RESTART_ANSWER:-Y}"
+if [[ "$RESTART_ANSWER" =~ ^[Yy] ]]; then
+    echo ""
+    echo "Hermes gateway status BEFORE restart:"
+    systemctl status hermes-gateway --no-pager || true
+
+    echo ""
+    echo "Restarting Hermes gateway ..."
+    if systemctl restart hermes-gateway 2>/dev/null; then
+        echo "Hermes gateway restarted."
+    else
+        echo "systemctl restart failed, trying 'hermes gateway restart' ..."
+        hermes gateway restart || true
+    fi
+
+    echo ""
+    echo "Hermes gateway status AFTER restart:"
+    systemctl status hermes-gateway --no-pager || true
+else
+    echo "Skipped Hermes gateway restart. Remember to restart it manually:"
+    echo "  systemctl restart hermes-gateway"
+    echo "  # or"
+    echo "  hermes gateway restart"
+fi
+
 echo ""

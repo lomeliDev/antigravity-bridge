@@ -246,7 +246,9 @@ You can also pass them as arguments to skip the prompts:
 ./scripts/add-to-hermes.sh gemini-2.5-flash my-antigravity
 ```
 
-It only **registers** the bridge as a named custom provider in `~/.hermes/config.yaml`. It does **not** change your active model or default provider — you choose those in Hermes yourself:
+It only **registers** the bridge as a named custom provider in `~/.hermes/config.yaml`. It does **not** change your active model or default provider — you choose those in Hermes yourself.
+
+At the end the script asks if you want to restart the Hermes gateway and shows the status before and after:
 
 ```yaml
 custom_providers:
@@ -259,7 +261,7 @@ custom_providers:
         name: gemini-2.5-flash
 ```
 
-Restart Hermes so it reads the updated config:
+If you skipped the automatic restart, do it manually:
 
 ```bash
 hermes gateway restart     # if you use the Hermes gateway
