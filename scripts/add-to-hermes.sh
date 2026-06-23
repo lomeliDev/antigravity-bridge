@@ -25,7 +25,10 @@ if [[ -z "${BRIDGE_API_KEY:-}" ]]; then
     chmod 600 .env
     BRIDGE_API_KEY="${NEW_KEY}"
     echo "API key saved to .env. Restarting bridge service to pick it up ..."
-    systemctl restart antigravity-bridge 2>/dev/null || true
+    systemctl restart antigravity-bridge 2>/dev/null || \
+    launchctl stop com.lomelidev.antigravity-bridge 2>/dev/null || \
+    launchctl start com.lomelidev.antigravity-bridge 2>/dev/null || \
+    true
     sleep 2
 fi
 
@@ -176,28 +179,23 @@ RESTART_ANSWER="${RESTART_ANSWER:-Y}"
 if [[ "$RESTART_ANSWER" =~ ^[Yy] ]]; then
     echo ""
     echo "Restarting Hermes gateway ..."
-    if systemctl restart hermes-gateway 2>/dev/null; then
+    # Try hermes CLI first (cross-platform), then systemctl (Linux), then launchctl (macOS).
+    if hermes gateway restart 2>/dev/null; then
+        echo "Hermes gateway restarted via hermes CLI."
+    elif systemctl restart hermes-gateway 2>/dev/null; then
         echo "Hermes gateway restarted via systemctl."
     elif [[ "$EUID" -eq 0 ]]; then
         echo "Running as root — restarting gateway process directly ..."
-        if command -v hermes >/dev/null 2>&1; then
-            hermes gateway restart --run-as-user root 2>/dev/null || {
-                # Fallback: kill the gateway and restart it
-                echo "Direct restart failed, killing and restarting gateway ..."
-                pkill -f "hermes gateway" 2>/dev/null || true
-                sleep 2
-                nohup hermes gateway > /dev/null 2>&1 &
-                echo "Gateway restarted in background."
-            }
-        fi
+        pkill -f "hermes gateway" 2>/dev/null || true
+        sleep 2
+        nohup hermes gateway > /dev/null 2>&1 &
+        echo "Gateway restarted in background."
     else
-        echo "Trying 'hermes gateway restart' ..."
-        hermes gateway restart || true
+        echo "Could not restart Hermes gateway automatically."
+        echo "Please restart it manually and re-run this script."
     fi
 else
     echo "Skipped Hermes gateway restart. Remember to restart it manually:"
-    echo "  systemctl restart hermes-gateway"
-    echo "  # or"
     echo "  hermes gateway restart"
 fi
 

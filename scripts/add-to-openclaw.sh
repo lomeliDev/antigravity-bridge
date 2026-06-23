@@ -126,25 +126,20 @@ read -rp "Apply OpenClaw config and restart the gateway now? [Y/n]: " RESTART_AN
 RESTART_ANSWER="${RESTART_ANSWER:-Y}"
 if [[ "$RESTART_ANSWER" =~ ^[Yy] ]]; then
     echo ""
-    echo "OpenClaw gateway status BEFORE restart:"
-    systemctl status openclaw-gateway --no-pager 2>/dev/null || true
-
-    echo ""
     echo "Applying OpenClaw config ..."
-    openclaw gateway config.apply --file "${CONFIG_PATH}" || true
+    openclaw gateway config.apply --file "${CONFIG_PATH}" 2>/dev/null || true
 
     echo ""
     echo "Restarting OpenClaw gateway ..."
-    if systemctl restart openclaw-gateway 2>/dev/null; then
-        echo "OpenClaw gateway restarted."
+    if openclaw gateway restart 2>/dev/null; then
+        echo "OpenClaw gateway restarted via openclaw CLI."
+    elif systemctl restart openclaw-gateway 2>/dev/null; then
+        echo "OpenClaw gateway restarted via systemctl."
     else
-        echo "Could not restart 'openclaw-gateway' via systemctl."
-        echo "Please restart it manually with your OpenClaw management command."
+        echo "Could not restart OpenClaw gateway automatically."
+        echo "Restart it manually, or apply the config with:"
+        echo "  openclaw gateway config.apply --file ${CONFIG_PATH}"
     fi
-
-    echo ""
-    echo "OpenClaw gateway status AFTER restart:"
-    systemctl status openclaw-gateway --no-pager 2>/dev/null || true
 else
     echo "Skipped OpenClaw gateway restart. Apply the config manually with:"
     echo "  openclaw gateway config.apply --file ${CONFIG_PATH}"
