@@ -71,7 +71,8 @@ The installer will:
 11. Detect your platform and install a **systemd** (Linux) or **launchd** (macOS) daemon automatically.
 12. Run health / models validation tests.
 
-> If you prefer to install the prerequisites yourself first, see [Before you begin](#before-you-begin).
+> The installer handles everything for you, including the `agy login` and `opencode auth login` OAuth flows. You only need to follow the on-screen prompts.
+> If you prefer to set up the prerequisites manually, see [Requirements](#requirements) and [Before you begin](#before-you-begin).
 
 ### Manual run (fallback)
 
