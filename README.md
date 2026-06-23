@@ -244,7 +244,7 @@ You can pass a different provider name if you already have other OAuth plugins:
 ./scripts/add-to-hermes.sh gemini-2.5-flash my-antigravity
 ```
 
-It creates a **named custom provider** in `~/.hermes/config.yaml` so it does not collide with other `custom` endpoints:
+It only **registers** the bridge as a named custom provider in `~/.hermes/config.yaml`. It does **not** change your active model or default provider — you choose those in Hermes yourself:
 
 ```yaml
 custom_providers:
@@ -255,10 +255,6 @@ custom_providers:
     models:
       - id: gemini-2.5-flash
         name: gemini-2.5-flash
-
-model:
-  provider: custom:antigravity-bridge
-  default: gemini-2.5-flash
 ```
 
 Restart Hermes so it reads the updated config:
@@ -268,7 +264,7 @@ hermes gateway restart     # if you use the Hermes gateway
 # or close and reopen Hermes if you use the CLI/TUI
 ```
 
-Then switch models with:
+Then pick the provider in the Hermes panel, or run:
 
 ```bash
 /model custom:antigravity-bridge:gemini-2.5-flash
