@@ -246,20 +246,24 @@ You can also pass them as arguments to skip the prompts:
 ./scripts/add-to-hermes.sh gemini-2.5-flash my-antigravity
 ```
 
-It only **registers** the bridge as a named custom provider in `~/.hermes/config.yaml`. It does **not** change your active model or default provider — you choose those in Hermes yourself.
-
-At the end the script asks if you want to restart the Hermes gateway and shows the status before and after:
+It registers the bridge as a named provider under `providers` in `~/.hermes/config.yaml` (and also keeps `custom_providers` for older Hermes versions). It then asks if you want to set it as the active provider:
 
 ```yaml
-custom_providers:
-  - name: antigravity-bridge
+providers:
+  antigravity-bridge:
     base_url: http://127.0.0.1:52847/v1
     api_key: your-bridge-api-key          # only if you enabled auth
     api_mode: chat_completions
     models:
       - id: gemini-2.5-flash
         name: gemini-2.5-flash
+
+model:
+  provider: antigravity-bridge
+  default: gemini-2.5-flash
 ```
+
+At the end the script asks if you want to restart the Hermes gateway and shows the status before and after.
 
 If you skipped the automatic restart, do it manually:
 
@@ -268,10 +272,12 @@ hermes gateway restart     # if you use the Hermes gateway
 # or close and reopen Hermes if you use the CLI/TUI
 ```
 
-> **Important:** make sure you select the **bridge** provider/model, not another provider that also offers `gemini-2.5-flash`. If the status bar shows a different provider (for example `Nous Research`), you are not using the bridge. Pick the provider in the Hermes panel, or run:
+> **Important:** if the status bar still shows a different provider (for example `Nous Research`), Hermes is using another endpoint (such as OpenRouter). Make sure `model.provider` points to `antigravity-bridge` and that `model.base_url` is not set to a different service.
+
+If you prefer not to activate the bridge immediately, answer `n` when the script asks. You can switch later with:
 
 ```bash
-/model custom:antigravity-bridge:gemini-2.5-flash
+/model antigravity-bridge:gemini-2.5-flash
 ```
 
 ### OpenClaw

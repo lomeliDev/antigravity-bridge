@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 #
 # Add the local Antigravity Bridge as a named custom OpenAI-compatible provider in Hermes.
-# This script only registers the provider in ~/.hermes/config.yaml.
-# It does NOT change the active model or default provider — you pick it in Hermes.
+
 #
 set -euo pipefail
 
@@ -72,6 +71,9 @@ if [[ -f "$HERMES_CONFIG" ]]; then
     cp "$HERMES_CONFIG" "${HERMES_CONFIG}.backup.$(date +%s)"
 fi
 
+read -rp "Set '${PROVIDER_NAME}' as the active Hermes provider? [Y/n]: " SET_ACTIVE
+SET_ACTIVE="${SET_ACTIVE:-Y}"
+
 "$PYTHON_BIN" - <<PY
 import os
 import yaml
@@ -81,6 +83,7 @@ provider_name = "${PROVIDER_NAME}"
 base_url = "${BASE_URL}"
 api_key = """${BRIDGE_API_KEY:-}""".strip()
 model = "${DEFAULT_MODEL}"
+set_active = "${SET_ACTIVE}".lower().startswith("y")
 
 if os.path.exists(config_path):
     with open(config_path, "r") as f:
@@ -88,23 +91,35 @@ if os.path.exists(config_path):
 else:
     data = {}
 
-# Ensure custom_providers list exists and remove any previous entry with same name.
-custom_providers = data.setdefault("custom_providers", [])
-custom_providers[:] = [p for p in custom_providers if p.get("name") != provider_name]
-
+# Hermes resolves named providers from the top-level 'providers' map.
+providers = data.setdefault("providers", {})
 provider = {
-    "name": provider_name,
     "base_url": base_url,
     "api_mode": "chat_completions",
     "models": [{"id": model, "name": model}],
 }
 if api_key:
     provider["api_key"] = api_key
+providers[provider_name] = provider
 
-custom_providers.append(provider)
+# Keep custom_providers in sync for older Hermes versions.
+custom_providers = data.setdefault("custom_providers", [])
+custom_providers[:] = [p for p in custom_providers if p.get("name") != provider_name]
+custom_providers.append({
+    "name": provider_name,
+    "base_url": base_url,
+    "api_mode": "chat_completions",
+    "models": [{"id": model, "name": model}],
+    **({"api_key": api_key} if api_key else {}),
+})
 
-# NOTE: We intentionally do NOT change model.provider or model.default here.
-# The user selects the active provider/model inside Hermes.
+if set_active:
+    model_section = data.setdefault("model", {})
+    model_section["provider"] = provider_name
+    model_section["default"] = model
+    # Remove stale global custom base_url/api_key that would override the provider.
+    model_section.pop("base_url", None)
+    model_section.pop("api_key", None)
 
 with open(config_path, "w") as f:
     yaml.dump(data, f, default_flow_style=False, sort_keys=False, allow_unicode=True)
@@ -113,10 +128,15 @@ print(f"Updated {config_path}")
 PY
 
 echo ""
-echo "✔ Hermes now knows the provider 'custom:${PROVIDER_NAME}'."
-echo ""
-echo "Then choose the provider/model in the Hermes panel, or run:"
-echo "  /model custom:${PROVIDER_NAME}:${DEFAULT_MODEL}"
+if [[ "${SET_ACTIVE}" =~ ^[Yy] ]]; then
+    echo "✔ Hermes is configured to use '${PROVIDER_NAME}' as the active provider."
+    echo "  Model: ${DEFAULT_MODEL}"
+else
+    echo "✔ Hermes now knows the provider '${PROVIDER_NAME}'."
+    echo ""
+    echo "To activate it manually, run:"
+    echo "  /model ${PROVIDER_NAME}:${DEFAULT_MODEL}"
+fi
 echo ""
 
 # Restart Hermes gateway so it picks up the new custom provider.
