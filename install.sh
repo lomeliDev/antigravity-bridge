@@ -35,6 +35,18 @@ error()   { echo -e "${RED}✖${RESET}  $*"; }
 # OpenCode / Antigravity prerequisite helpers
 # ---------------------------------------------------------------------------
 OPENCODE_CONFIG="${HOME}/.config/opencode/opencode.json"
+ANTIGRAVITY_CLI_BIN="agy"
+
+# Add the common install directories to PATH so we can find just-installed CLIs.
+export PATH="${HOME}/.opencode/bin:${HOME}/.local/bin:${PATH}"
+
+print_step() {
+    local num="$1"
+    local title="$2"
+    echo ""
+    echo -e "${CYAN}${BOLD}Step ${num}: ${title}${RESET}"
+    echo "────────────────────────────────────────────────────────────────"
+}
 
 print_prereq_help() {
     echo ""
@@ -43,23 +55,67 @@ print_prereq_help() {
     echo "The bridge reuses the Google OAuth session created by OpenCode."
     echo ""
     echo "1. Install the OpenCode CLI:"
-    echo "     https://opencode.ai"
+    echo "     curl -fsSL https://opencode.ai/install | bash"
     echo ""
-    echo "2. Add the Antigravity auth plugin to ${OPENCODE_CONFIG}:"
+    echo "2. Install the Antigravity CLI:"
+    echo "     curl -fsSL https://antigravity.google/cli/install.sh | bash"
+    echo ""
+    echo "3. Log in with the Antigravity CLI:"
+    echo "     agy login"
+    echo ""
+    echo "4. Add the Antigravity auth plugin to ${OPENCODE_CONFIG}:"
     echo ""
     echo '     {'
     echo '       "plugin": ["opencode-antigravity-auth@latest"]'
     echo '     }'
     echo ""
-    echo "3. Authenticate with Google:"
+    echo "5. Authenticate with Google through OpenCode:"
     echo "     opencode auth login"
     echo ""
     echo "   Select  Google  →  OAuth with Google (Antigravity)"
-    echo "   and sign in with the Google account that has Antigravity access."
+    echo "   and sign in with the same Google account."
     echo ""
-    echo "4. Verify the credential was stored:"
+    echo "6. Verify the credential was stored:"
     echo "     opencode auth list"
     echo ""
+}
+
+install_opencode() {
+    warn "OpenCode CLI not found."
+    read -rp "Install OpenCode automatically? [Y/n]: " INSTALL_OPENCODE
+    INSTALL_OPENCODE="${INSTALL_OPENCODE:-Y}"
+    if [[ ! "$INSTALL_OPENCODE" =~ ^[Yy]$ ]]; then
+        print_prereq_help
+        exit 1
+    fi
+    info "Installing OpenCode ..."
+    curl -fsSL https://opencode.ai/install | bash
+    export PATH="${HOME}/.opencode/bin:${HOME}/.local/bin:${PATH}"
+    if ! command -v opencode >/dev/null 2>&1; then
+        error "OpenCode installation failed or is not on PATH."
+        error "Try opening a new terminal or adding ${HOME}/.opencode/bin to PATH."
+        exit 1
+    fi
+    success "OpenCode installed."
+}
+
+install_antigravity_cli() {
+    warn "Antigravity CLI (agy) not found."
+    read -rp "Install Antigravity CLI automatically? [Y/n]: " INSTALL_AGY
+    INSTALL_AGY="${INSTALL_AGY:-Y}"
+    if [[ ! "$INSTALL_AGY" =~ ^[Yy]$ ]]; then
+        print_prereq_help
+        exit 1
+    fi
+    info "Installing Antigravity CLI ..."
+    curl -fsSL https://antigravity.google/cli/install.sh | bash
+    export PATH="${HOME}/.local/bin:${PATH}"
+    if ! command -v "$ANTIGRAVITY_CLI_BIN" >/dev/null 2>&1; then
+        error "Antigravity CLI installation failed or is not on PATH."
+        error "Try opening a new terminal or adding ${HOME}/.local/bin to PATH."
+        exit 1
+    fi
+    success "Antigravity CLI installed."
 }
 
 install_opencode_plugin() {
@@ -98,23 +154,11 @@ EOF
     fi
 }
 
-check_opencode_prerequisites() {
-    echo ""
-    echo -e "${BOLD}OpenCode / Antigravity prerequisites${RESET}"
-    echo "────────────────────────────────────────────────────────────────"
-
-    # 1) opencode CLI
-    if ! command -v opencode >/dev/null 2>&1; then
-        error "The 'opencode' CLI was not found."
-        print_prereq_help
-        exit 1
+plugin_is_configured() {
+    if [[ ! -f "$OPENCODE_CONFIG" ]]; then
+        return 1
     fi
-    success "opencode CLI found."
-
-    # 2) opencode-antigravity-auth plugin configured
-    local plugin_ok=false
-    if [[ -f "$OPENCODE_CONFIG" ]]; then
-        if python3 - <<PY
+    python3 - <<PY
 import json, sys
 path = "${OPENCODE_CONFIG}"
 try:
@@ -129,22 +173,144 @@ except Exception:
     pass
 sys.exit(1)
 PY
-        then
-            plugin_ok=true
-        fi
+}
+
+agy_session_exists() {
+    # Antigravity CLI stores OAuth state under ~/.gemini/antigravity-cli/.
+    [[ -f "${HOME}/.gemini/antigravity-cli/credentials.enc" ]] || \
+    [[ -f "${HOME}/.gemini/antigravity-cli/settings.json" ]]
+}
+
+opencode_google_auth_exists() {
+    local auth_json="${HOME}/.local/share/opencode/auth.json"
+    [[ -f "$auth_json" ]] || return 1
+    python3 - <<PY
+import json, sys
+path = "${auth_json}"
+try:
+    with open(path, "r") as f:
+        data = json.load(f)
+    for key in ("google", "opencode-antigravity-auth"):
+        entry = data.get(key)
+        if isinstance(entry, dict) and entry.get("type") == "oauth":
+            sys.exit(0)
+except Exception:
+    pass
+sys.exit(1)
+PY
+}
+
+run_interactive_login() {
+    local tool="$1"
+    local cmd="$2"
+    echo ""
+    info "The installer will now run '${cmd}' so you can log in."
+    info "Please follow the on-screen prompts and return here when done."
+    read -rp "Press Enter to continue ..."
+    $cmd || true
+}
+
+check_opencode_prerequisites() {
+    # Step 1: OpenCode CLI
+    print_step 1 "Install OpenCode CLI"
+    if ! command -v opencode >/dev/null 2>&1; then
+        install_opencode
+    else
+        success "OpenCode CLI found: $(opencode --version 2>/dev/null | head -n1 || echo opencode)"
     fi
 
-    if [[ "$plugin_ok" == "true" ]]; then
-        success "opencode-antigravity-auth plugin is configured."
+    # Step 2: Antigravity CLI (agy)
+    print_step 2 "Install Antigravity CLI (agy)"
+    if ! command -v "$ANTIGRAVITY_CLI_BIN" >/dev/null 2>&1; then
+        install_antigravity_cli
+    else
+        success "Antigravity CLI found: $(${ANTIGRAVITY_CLI_BIN} --version 2>/dev/null | head -n1 || echo agy)"
+    fi
+
+    # Step 3: Antigravity CLI login
+    print_step 3 "Log in with Antigravity CLI (agy)"
+    if agy_session_exists; then
+        success "An agy session was detected."
+    else
+        warn "No agy session was detected. You must log in first."
+        read -rp "Run 'agy login' now? [Y/n]: " RUN_AGY_LOGIN
+        RUN_AGY_LOGIN="${RUN_AGY_LOGIN:-Y}"
+        if [[ "$RUN_AGY_LOGIN" =~ ^[Yy]$ ]]; then
+            # Try the newer 'agy login' subcommand; fall back to launching agy itself.
+            if "$ANTIGRAVITY_CLI_BIN" login --help >/dev/null 2>&1; then
+                run_interactive_login "agy" "$ANTIGRAVITY_CLI_BIN login"
+            else
+                run_interactive_login "agy" "$ANTIGRAVITY_CLI_BIN"
+            fi
+        fi
+        if ! agy_session_exists; then
+            warn "Still no agy session detected."
+            read -rp "Did you complete the agy login successfully? [y/N]: " AGY_OK
+            if [[ ! "${AGY_OK:-N}" =~ ^[Yy]$ ]]; then
+                print_prereq_help
+                exit 1
+            fi
+        fi
+    fi
+    success "Antigravity CLI login verified."
+
+    # Step 4: opencode-antigravity-auth plugin
+    print_step 4 "Configure opencode-antigravity-auth plugin"
+    if plugin_is_configured; then
+        success "opencode-antigravity-auth plugin is already configured."
     else
         warn "The opencode-antigravity-auth plugin is not configured."
         info "It is required so OpenCode can authenticate with Antigravity via Google OAuth."
-        read -rp "Install the plugin automatically? [Y/n]: " INSTALL_PLUGIN
+        read -rp "Add the plugin automatically? [Y/n]: " INSTALL_PLUGIN
         INSTALL_PLUGIN="${INSTALL_PLUGIN:-Y}"
         if [[ "$INSTALL_PLUGIN" =~ ^[Yy]$ ]]; then
             install_opencode_plugin "$OPENCODE_CONFIG"
         else
             print_prereq_help
+            exit 1
+        fi
+    fi
+
+    # Step 5: OpenCode Google OAuth login
+    print_step 5 "Log in with OpenCode (Google OAuth)"
+    if opencode_google_auth_exists; then
+        success "OpenCode Google OAuth credential found."
+    else
+        warn "No OpenCode Google OAuth credential found."
+        read -rp "Run 'opencode auth login' now? [Y/n]: " RUN_OPENCODE_LOGIN
+        RUN_OPENCODE_LOGIN="${RUN_OPENCODE_LOGIN:-Y}"
+        if [[ "$RUN_OPENCODE_LOGIN" =~ ^[Yy]$ ]]; then
+            run_interactive_login "opencode" "opencode auth login"
+        fi
+        if ! opencode_google_auth_exists; then
+            warn "Still no OpenCode Google OAuth credential found."
+            read -rp "Did you complete the OpenCode login successfully? [y/N]: " OPENCODE_OK
+            if [[ ! "${OPENCODE_OK:-N}" =~ ^[Yy]$ ]]; then
+                print_prereq_help
+                exit 1
+            fi
+        fi
+    fi
+    success "OpenCode Google OAuth login verified."
+
+    # Step 6: Credential file sanity check
+    print_step 6 "Validate credential files"
+    local cred_files_ok=true
+    for path in "$DEFAULT_ANTIGRAVITY_CONST" "$DEFAULT_ANTIGRAVITY_ACCOUNTS" "$DEFAULT_ANTIGRAVITY_AUTH"; do
+        if [[ -f "$path" ]]; then
+            success "Found ${path}"
+        else
+            warn "Missing ${path}"
+            cred_files_ok=false
+        fi
+    done
+    if [[ "$cred_files_ok" == "false" ]]; then
+        error "Some credential files are still missing."
+        info "Try running: opencode auth list"
+        info "If the login succeeded but files are missing, the plugin may use different paths."
+        info "You can override paths with ANTIGRAVITY_CONST, ANTIGRAVITY_ACCOUNTS and ANTIGRAVITY_AUTH."
+        read -rp "Continue anyway? [y/N]: " CONTINUE
+        if [[ ! "${CONTINUE:-N}" =~ ^[Yy]$ ]]; then
             exit 1
         fi
     fi
@@ -215,46 +381,7 @@ success "Dependencies installed."
 # ---------------------------------------------------------------------------
 # Antigravity / OpenCode credential validation
 # ---------------------------------------------------------------------------
-info "Looking for Antigravity credentials ..."
-
-CRED_LABELS=("constants.js" "accounts.json" "auth.json")
-CRED_PATHS=("$DEFAULT_ANTIGRAVITY_CONST" "$DEFAULT_ANTIGRAVITY_ACCOUNTS" "$DEFAULT_ANTIGRAVITY_AUTH")
-for i in "${!CRED_LABELS[@]}"; do
-    label="${CRED_LABELS[$i]}"
-    path="${CRED_PATHS[$i]}"
-    if [[ -f "$path" ]]; then
-        success "Found ${label}: ${path}"
-    else
-        warn "Missing ${label}: ${path}"
-        CREDENTIALS_OK=false
-    fi
-done
-
-if [[ "$CREDENTIALS_OK" == "false" ]]; then
-    warn "One or more Antigravity credential files were not found."
-    warn "The bridge needs these files to authenticate with Antigravity."
-    print_prereq_help
-    read -rp "Run 'opencode auth login' now? [y/N]: " RUN_LOGIN
-    if [[ "${RUN_LOGIN:-N}" =~ ^[Yy]$ ]]; then
-        opencode auth login
-        # Re-check credentials after login
-        CREDENTIALS_OK=true
-        for i in "${!CRED_LABELS[@]}"; do
-            path="${CRED_PATHS[$i]}"
-            if [[ ! -f "$path" ]]; then
-                warn "Still missing: ${path}"
-                CREDENTIALS_OK=false
-            fi
-        done
-        if [[ "$CREDENTIALS_OK" == "false" ]]; then
-            error "Credentials are still missing after login. Please finish the OAuth flow and rerun the installer."
-            exit 1
-        fi
-    else
-        error "Please complete the OpenCode Antigravity login and rerun the installer."
-        exit 1
-    fi
-fi
+info "Credential files were already validated in the prerequisites step."
 
 # ---------------------------------------------------------------------------
 # Configuration prompts
