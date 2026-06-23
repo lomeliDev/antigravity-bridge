@@ -4,7 +4,7 @@ Antigravity -> OpenAI compatible bridge.
 
 Run:
   pip install -r requirements.txt
-  python3 server.py [--host 127.0.0.1] [--port 8080]
+  python3 server.py [--host 127.0.0.1] [--port 52847]
 
 Environment variables:
   HOST / PORT               - listen address/port
@@ -759,7 +759,7 @@ def chat_completions():
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--host", default=os.environ.get("HOST", "127.0.0.1"))
-    parser.add_argument("--port", type=int, default=int(os.environ.get("PORT", "8080")))
+    parser.add_argument("--port", type=int, default=int(os.environ.get("PORT", "52847")))
     args = parser.parse_args()
 
     # Eager-init: refresh token and load projectId at startup.

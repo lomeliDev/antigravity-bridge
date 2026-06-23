@@ -319,7 +319,7 @@ check_opencode_prerequisites() {
 # ---------------------------------------------------------------------------
 # Defaults
 # ---------------------------------------------------------------------------
-DEFAULT_PORT=8080
+DEFAULT_PORT=52847
 DEFAULT_ANTIGRAVITY_CONST="${ANTIGRAVITY_CONST:-$HOME/.cache/opencode/packages/opencode-antigravity-auth@latest/node_modules/opencode-antigravity-auth/dist/src/constants.js}"
 DEFAULT_ANTIGRAVITY_ACCOUNTS="${ANTIGRAVITY_ACCOUNTS:-$HOME/.config/opencode/antigravity-accounts.json}"
 DEFAULT_ANTIGRAVITY_AUTH="${ANTIGRAVITY_AUTH:-$HOME/.local/share/opencode/auth.json}"

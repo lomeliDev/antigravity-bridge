@@ -66,7 +66,7 @@ The installer will:
 6. Validate the Antigravity credential files.
 7. Check Python 3.10+ and create a virtual environment.
 8. Install Python dependencies.
-9. Ask for a **port** (default `8080`).
+9. Ask for a **port** (default `52847`).
 10. Ask whether to enable an **API key / password** (generates a random one by default).
 11. Detect your platform and install a **systemd** (Linux) or **launchd** (macOS) daemon automatically.
 12. Run health / models validation tests.
@@ -85,7 +85,7 @@ Or run directly:
 
 ```bash
 source .env
-.venv/bin/python3 server.py --host 0.0.0.0 --port 8080
+.venv/bin/python3 server.py --host 0.0.0.0 --port 52847
 ```
 
 ---
@@ -191,7 +191,7 @@ The bridge is configured through environment variables. The installer writes the
 | Variable | Default | Purpose |
 |----------|---------|---------|
 | `HOST` | `127.0.0.1` | Listen host |
-| `PORT` | `8080` | Listen port |
+| `PORT` | `52847` | Listen port |
 | `BRIDGE_API_KEY` | *(none)* | Optional API key required from clients (`Authorization: Bearer <key>`) |
 | `ANTIGRAVITY_CONST` | `~/.cache/opencode/.../constants.js` | OAuth client id/secret |
 | `ANTIGRAVITY_ACCOUNTS` | `~/.config/opencode/antigravity-accounts.json` | Account + refresh token |
@@ -233,7 +233,7 @@ It creates a **named custom provider** in `~/.hermes/config.yaml` so it does not
 ```yaml
 custom_providers:
   - name: antigravity-bridge
-    base_url: http://127.0.0.1:8080/v1
+    base_url: http://127.0.0.1:52847/v1
     api_key: your-bridge-api-key          # only if you enabled auth
     api_mode: chat_completions
     models:
@@ -267,7 +267,7 @@ It edits `~/.openclaw/openclaw.json` (creating it if necessary) and adds the bri
     "mode": "merge",
     "providers": {
       "antigravity-bridge": {
-        "baseUrl": "http://127.0.0.1:8080/v1",
+        "baseUrl": "http://127.0.0.1:52847/v1",
         "api": "openai-completions",
         "apiKey": "your-bridge-api-key",
         "models": [{ "id": "gemini-2.5-flash", "name": "gemini-2.5-flash" }]
@@ -333,7 +333,7 @@ Then in chat:
 ## 🧪 API quick tests
 
 ```bash
-BASE=http://127.0.0.1:8080
+BASE=http://127.0.0.1:52847
 KEY="your-bridge-api-key-or-empty"
 AUTH=""
 [ -n "$KEY" ] && AUTH="-H Authorization: Bearer $KEY"
