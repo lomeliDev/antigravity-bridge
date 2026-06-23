@@ -413,6 +413,40 @@ info "Installing Python dependencies ..."
 success "Dependencies installed."
 
 # ---------------------------------------------------------------------------
+# MCP runtime dependencies (uv/uvx)
+# ---------------------------------------------------------------------------
+info "Checking MCP runtime dependencies ..."
+MCP_DEPS_OK=true
+
+# uv/uvx — needed by many MCP servers (huggingface, elevenlabs, aws-*, etc.)
+if ! command -v uvx >/dev/null 2>&1 && ! command -v uv >/dev/null 2>&1; then
+    warn "uv/uvx not found. Installing via pip ..."
+    if .venv/bin/pip install -q uv 2>/dev/null; then
+        # Ensure ~/.local/bin is on PATH for this session and the daemon.
+        export PATH="${HOME}/.local/bin:${PATH}"
+        if command -v uvx >/dev/null 2>&1; then
+            success "uv/uvx installed."
+        else
+            warn "uv installed but uvx not on PATH. MCP servers that need it may fail."
+            MCP_DEPS_OK=false
+        fi
+    else
+        warn "Could not install uv. MCP servers (huggingface, aws, etc.) will fail to connect."
+        warn "Install manually: curl -LsSf https://astral.sh/uv/install.sh | sh"
+        MCP_DEPS_OK=false
+    fi
+else
+    success "uv/uvx found."
+fi
+
+if [[ "$MCP_DEPS_OK" == "false" ]]; then
+    echo ""
+    warn "Some MCP servers may not connect. This only affects Hermes MCP tools."
+    warn "The bridge itself (chat + function calling) will work fine."
+    echo ""
+fi
+
+# ---------------------------------------------------------------------------
 # Antigravity / OpenCode credential validation
 # ---------------------------------------------------------------------------
 info "Credential files were already validated in the prerequisites step."

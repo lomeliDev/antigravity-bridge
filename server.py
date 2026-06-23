@@ -478,6 +478,13 @@ def _model_max_output_tokens(model_id: str) -> int:
 def build_gemini_request(model: str, body: dict[str, Any], contents: list, system_instr: str) -> dict[str, Any]:
     # Antigravity expects the model id without the "models/" prefix.
     model_id = model[7:] if model.startswith("models/") else model
+
+    # Warn about OpenAI params that Antigravity does not support.
+    _UNSUPPORTED_PARAMS = ("logprobs", "frequency_penalty", "presence_penalty", "logit_bias", "top_logprobs")
+    for param in _UNSUPPORTED_PARAMS:
+        if param in body and body[param] is not None and body[param] != 0:
+            print(f"[bridge] WARN unsupported param '{param}' ignored", file=sys.stderr, flush=True)
+
     raw_max_tokens = body.get("max_completion_tokens") or body.get("max_tokens", 8192)
     max_output = min(int(raw_max_tokens), _model_max_output_tokens(model_id))
     generation_config: dict[str, Any] = {
