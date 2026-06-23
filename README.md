@@ -31,6 +31,7 @@ Built for agents and clients that do **not** support Google OAuth directly: **He
 - [API quick tests](#api-quick-tests)
 - [Common mistakes](#common-mistakes)
 - [Troubleshooting](#troubleshooting)
+- [Disclaimer](#disclaimer)
 - [License](#license)
 
 ---
@@ -412,6 +413,22 @@ curl -N "$BASE/v1/chat/completions" \
 | `401 Unauthorized` | Set `Authorization: Bearer <BRIDGE_API_KEY>` in your client, or disable the API key in `.env`. |
 | Models list is empty | The bridge could not refresh the Antigravity token. Check `bridge.log` and verify the credential files are valid. |
 | Service fails to start | Run the bridge manually to see the error: `source .env && .venv/bin/python3 server.py` |
+
+---
+
+## ⚠️ Disclaimer
+
+This is an **unofficial, experimental** project. The author is not affiliated with Google, Antigravity, Gemini Code Assist, OpenCode, or any other mentioned service.
+
+By installing and using this software you agree that:
+
+- You use it **at your own risk**.
+- The author is **not responsible** for account bans, suspensions, rate-limit issues, data loss, security incidents, or any other consequences.
+- You are solely responsible for complying with the terms of service of any third-party service you access through this bridge.
+
+The author created this project "just for fun". Be conscious of what you do with it.
+
+See [DISCLAIMER.md](DISCLAIMER.md) for the full text.
 
 ---
 
