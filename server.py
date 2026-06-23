@@ -355,11 +355,12 @@ def _tool_result_to_response(raw: Any) -> dict[str, Any]:
     return {"result": raw}
 
 
-def oai_messages_to_gemini(messages: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], str]:
+def oai_messages_to_gemini(messages: list[dict[str, Any]], model_id: str = "") -> tuple[list[dict[str, Any]], str]:
     """OpenAI chat -> Gemini (contents + system_instruction). Supports text, images and tools."""
     tool_names = _tool_call_id_to_name(messages)
     system_parts: list[str] = []
     contents: list[dict[str, Any]] = []
+    is_claude = _is_claude_model(model_id)
     for msg in messages:
         role = msg.get("role")
         content = msg.get("content", "")
@@ -383,10 +384,29 @@ def oai_messages_to_gemini(messages: list[dict[str, Any]]) -> tuple[list[dict[st
                 )
             parts: list[dict[str, Any]] = []
             text = content or "(tool call)"
-            parts.append({"text": text})
-            # Convert OpenAI tool_calls to Gemini functionCall parts so
-            # the conversation history preserves tool usage for all providers.
-            for tc in msg.get("tool_calls", []) or []:
+            tc_list = msg.get("tool_calls", []) or []
+            has_tool_calls = bool(tc_list)
+
+            # Gemini/Antigravity requires a signed thinking part before
+            # functionCall parts in conversation history.  Claude rejects
+            # the sentinel signature, so skip injection for Claude models.
+            SENTINEL = "skip_thought_signature_validator"
+            if has_tool_calls and not is_claude:
+                parts.append({
+                    "thought": True,
+                    "text": text,
+                    "thoughtSignature": SENTINEL,
+                })
+                text = None  # don't duplicate text
+            if text:
+                parts.append({"text": text})
+
+            # Convert OpenAI tool_calls to Gemini functionCall parts.
+            # The first functionCall part carries thought_signature at
+            # the PART level (alongside functionCall, not inside it).
+            # Parallel calls must NOT carry a signature (API requirement).
+            first_fc = True
+            for tc in tc_list:
                 if not isinstance(tc, dict):
                     continue
                 fn = tc.get("function", {})
@@ -399,7 +419,12 @@ def oai_messages_to_gemini(messages: list[dict[str, Any]]) -> tuple[list[dict[st
                 except Exception:
                     args = args_str
                 fc_id = tc.get("id") or f"call_{uuid.uuid4().hex[:24]}"
-                parts.append({"functionCall": {"name": name, "args": args, "id": fc_id}})
+                fc_part: dict[str, Any] = {"functionCall": {"name": name, "args": args, "id": fc_id}}
+                if has_tool_calls and first_fc and not is_claude:
+                    fc_part["thought_signature"] = SENTINEL
+                    fc_part["thoughtSignature"] = SENTINEL
+                    first_fc = False
+                parts.append(fc_part)
                 # Remember the id for matching tool responses
                 tool_names[fc_id] = name
             contents.append({"role": "model", "parts": parts})
@@ -1031,7 +1056,7 @@ def chat_completions():
     if not messages:
         return jsonify({"error": {"message": "messages is required", "type": "invalid_request_error"}}), 400
 
-    contents, system_instr = oai_messages_to_gemini(messages)
+    contents, system_instr = oai_messages_to_gemini(messages, model)
     gemini_req = build_gemini_request(model, body, contents, system_instr)
 
     completion_id = f"chatcmpl-{uuid.uuid4().hex[:24]}"
