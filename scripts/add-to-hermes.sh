@@ -216,13 +216,23 @@ if [[ "$RESTART_ANSWER" =~ ^[Yy] ]]; then
         ((RESTART_ERRORS++)) || true
     fi
 
-    # 3) WebUI
+    # 3) WebUI (hermes-webui @ github.com/nesquena/hermes-webui)
     echo -n "  WebUI ... "
     if systemctl restart hermes-webui 2>/dev/null; then
         echo "✔ restarted (systemctl)"
     elif pkill -f "hermes-webui/server.py" 2>/dev/null; then
         sleep 1
-        echo "✔ killed (restart manually if needed)"
+        # Try to restart it — check common install paths
+        if [[ -f /opt/hermes-webui/server.py ]]; then
+            nohup /usr/local/lib/hermes-agent/venv/bin/python3 /opt/hermes-webui/server.py > /dev/null 2>&1 &
+            echo "✔ restarted (direct)"
+        elif command -v hermes-webui >/dev/null 2>&1; then
+            nohup hermes-webui > /dev/null 2>&1 &
+            echo "✔ restarted (CLI)"
+        else
+            echo "⚠ killed (restart manually: check hermes-webui install)"
+            ((RESTART_ERRORS++)) || true
+        fi
     else
         echo "⚠ skipped (not running or not found)"
         ((RESTART_ERRORS++)) || true

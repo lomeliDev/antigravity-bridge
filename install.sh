@@ -420,18 +420,26 @@ MCP_DEPS_OK=true
 
 # uv/uvx — needed by many MCP servers (huggingface, elevenlabs, aws-*, etc.)
 if ! command -v uvx >/dev/null 2>&1 && ! command -v uv >/dev/null 2>&1; then
-    warn "uv/uvx not found. Installing via pip ..."
+    warn "uv/uvx not found. Installing ..."
     if .venv/bin/pip install -q uv 2>/dev/null; then
-        # Ensure ~/.local/bin is on PATH for this session and the daemon.
         export PATH="${HOME}/.local/bin:${PATH}"
         if command -v uvx >/dev/null 2>&1; then
-            success "uv/uvx installed."
-        else
-            warn "uv installed but uvx not on PATH. MCP servers that need it may fail."
-            MCP_DEPS_OK=false
+            success "uv/uvx installed (pip)."
         fi
-    else
-        warn "Could not install uv. MCP servers (huggingface, aws, etc.) will fail to connect."
+    fi
+    # Fallback: official installer
+    if ! command -v uvx >/dev/null 2>&1; then
+        info "pip install failed, trying official installer ..."
+        if curl -LsSf https://astral.sh/uv/install.sh | sh 2>/dev/null; then
+            export PATH="${HOME}/.local/bin:${PATH}"
+            if command -v uvx >/dev/null 2>&1; then
+                success "uv/uvx installed (official)."
+            fi
+        fi
+    fi
+    if ! command -v uvx >/dev/null 2>&1; then
+        warn "Could not install uv/uvx automatically."
+        warn "MCP servers that depend on it will fail to connect."
         warn "Install manually: curl -LsSf https://astral.sh/uv/install.sh | sh"
         MCP_DEPS_OK=false
     fi
@@ -524,6 +532,7 @@ info "Generating daemon files ..."
 
 # systemd service
 sed -e "s|%USER%|$(whoami)|g" \
+    -e "s|%HOME%|${HOME}|g" \
     -e "s|%WORK_DIR%|${REPO_DIR}|g" \
     -e "s|%PYTHON_BIN_DIR%|${PYTHON_BIN_DIR}|g" \
     -e "s|%PORT%|${PORT}|g" \
@@ -553,7 +562,7 @@ cat > "${DAEMON_DIR}/com.lomelidev.antigravity-bridge.plist" <<EOF
     <key>EnvironmentVariables</key>
     <dict>
         <key>PATH</key>
-        <string>${PYTHON_BIN_DIR}:/usr/local/bin:/usr/bin:/bin</string>
+        <string>${PYTHON_BIN_DIR}:${HOME}/.local/bin:/usr/local/bin:/usr/bin:/bin</string>
         <key>PORT</key>
         <string>${PORT}</string>
         <key>ANTIGRAVITY_CONST</key>
