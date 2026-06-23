@@ -17,9 +17,9 @@ Built for agents and clients that do **not** support Google OAuth directly: **He
 ## 📖 Table of contents
 
 - [What is it?](#what-is-it)
+- [Quick install](#quick-install)
 - [Before you begin](#before-you-begin)
 - [Requirements](#requirements)
-- [Quick install](#quick-install)
 - [Configuration](#configuration)
 - [Agent setup](#agent-setup)
   - [Hermes](#hermes)
@@ -44,6 +44,48 @@ Your Antigravity / OpenCode IDE extension is already authenticated and keeps val
 │  Open WebUI │                    │                    │  + project │  :generateContent       │
 │  Continue   │                    │                    │            │  :streamGenerateContent │
 └─────────────┘                    └────────────────────┘            └─────────────────────────┘
+```
+
+---
+
+## 🚀 Quick install
+
+```bash
+git clone https://github.com/lomeliDev/antigravity-bridge.git
+cd antigravity-bridge
+./install.sh
+```
+
+The installer will:
+
+1. Install the OpenCode CLI if it is missing.
+2. Install the Antigravity CLI (`agy`) if it is missing.
+3. Guide you through `agy login` if no session exists.
+4. Add the `opencode-antigravity-auth` plugin to OpenCode if it is missing.
+5. Guide you through `opencode auth login` if no Google OAuth credential exists.
+6. Validate the Antigravity credential files.
+7. Check Python 3.10+ and create a virtual environment.
+8. Install Python dependencies.
+9. Ask for a **port** (default `8080`).
+10. Ask whether to enable an **API key / password** (generates a random one by default).
+11. Detect your platform and install a **systemd** (Linux) or **launchd** (macOS) daemon automatically.
+12. Run health / models validation tests.
+
+> If you prefer to install the prerequisites yourself first, see [Before you begin](#before-you-begin).
+
+### Manual run (fallback)
+
+If the installer cannot install a daemon, it creates a portable runner:
+
+```bash
+./daemon/run.sh
+```
+
+Or run directly:
+
+```bash
+source .env
+.venv/bin/python3 server.py --host 0.0.0.0 --port 8080
 ```
 
 ---
@@ -142,46 +184,6 @@ If any prerequisite is missing, the installer stops and tells you exactly what t
 
 ---
 
-## 🚀 Quick install
-
-```bash
-git clone https://github.com/lomeliDev/antigravity-bridge.git
-cd antigravity-bridge
-./install.sh
-```
-
-The installer will:
-
-1. Install the OpenCode CLI if it is missing.
-2. Install the Antigravity CLI (`agy`) if it is missing.
-3. Guide you through `agy login` if no session exists.
-4. Add the `opencode-antigravity-auth` plugin to OpenCode if it is missing.
-5. Guide you through `opencode auth login` if no Google OAuth credential exists.
-6. Validate the Antigravity credential files.
-7. Check Python 3.10+ and create a virtual environment.
-8. Install Python dependencies.
-9. Ask for a **port** (default `8080`).
-10. Ask whether to enable an **API key / password** (generates a random one by default).
-11. Detect your platform and install a **systemd** (Linux) or **launchd** (macOS) daemon automatically.
-12. Run health / models validation tests.
-
-### Manual run (fallback)
-
-If the installer cannot install a daemon, it creates a portable runner:
-
-```bash
-./daemon/run.sh
-```
-
-Or run directly:
-
-```bash
-source .env
-.venv/bin/python3 server.py --host 0.0.0.0 --port 8080
-```
-
----
-
 ## ⚙️ Configuration
 
 The bridge is configured through environment variables. The installer writes them to `.env`.
@@ -220,19 +222,33 @@ Run the helper script after `./install.sh`:
 ./scripts/add-to-hermes.sh
 ```
 
-It reads `.env` and runs the Hermes CLI commands for you:
+You can pass a different provider name if you already have other OAuth plugins:
 
 ```bash
-hermes config set model.provider custom
-hermes config set model.base_url http://127.0.0.1:8080/v1
-hermes config set model.api_key your-bridge-api-key   # only if you enabled auth
-hermes config set model.default gemini-2.5-flash
+./scripts/add-to-hermes.sh gemini-2.5-flash my-antigravity
+```
+
+It creates a **named custom provider** in `~/.hermes/config.yaml` so it does not collide with other `custom` endpoints:
+
+```yaml
+custom_providers:
+  - name: antigravity-bridge
+    base_url: http://127.0.0.1:8080/v1
+    api_key: your-bridge-api-key          # only if you enabled auth
+    api_mode: chat_completions
+    models:
+      - id: gemini-2.5-flash
+        name: gemini-2.5-flash
+
+model:
+  provider: custom:antigravity-bridge
+  default: gemini-2.5-flash
 ```
 
 Then start Hermes and switch models with:
 
 ```bash
-/model gemini-2.5-flash
+/model custom:antigravity-bridge:gemini-2.5-flash
 ```
 
 ### OpenClaw
