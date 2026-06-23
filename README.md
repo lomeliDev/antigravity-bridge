@@ -1,32 +1,68 @@
 <div align="center">
 
-# Antigravity Bridge
+# 🌌 Antigravity Bridge
 
-[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10+-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![OpenAI compatible](https://img.shields.io/badge/OpenAI-compatible-412991?logo=openai&logoColor=white)](https://platform.openai.com/docs/api-reference)
 
-**English** | [Español](#español)
+**Turn your [Antigravity](https://www.antigravity.ai/) / Gemini Code Assist Google OAuth session into an OpenAI-compatible API.**
 
-A tiny **OpenAI-compatible HTTP bridge** that wraps your **Antigravity / Gemini Code Assist** Google OAuth account, so clients like **Hermes**, **Open WebUI**, **Boba**, **BetterGPT**, etc. can use it.
+Use it with **Hermes**, **Open WebUI**, **Boba**, **BetterGPT**, **Continue**, or any other OpenAI client.
 
 </div>
 
 ---
 
-## What is it?
+## 📖 Table of contents
 
-Your Antigravity account is already authorized and stores valid tokens in `~/.local/share/opencode/auth.json`, but there is no standard OpenAI endpoint to consume it. This bridge closes that gap.
+- [What is it?](#what-is-it)
+- [Requirements](#requirements)
+- [Quick install](#quick-install)
+- [Configuration](#configuration)
+- [Connect your client](#connect-your-client)
+- [Supported features](#supported-features)
+- [API quick tests](#api-quick-tests)
+- [Troubleshooting](#troubleshooting)
+- [License](#license)
+
+---
+
+## ✨ What is it?
+
+Your Antigravity / OpenCode IDE extension is already authenticated and keeps valid tokens in `~/.local/share/opencode/auth.json`. This small Flask bridge exposes those credentials through a clean **OpenAI-compatible HTTP API**, so you can reuse your account from any client that speaks the OpenAI protocol.
 
 ```text
-┌──────────┐    OpenAI API    ┌────────────────────┐   HTTPS   ┌──────────────────────┐
-│  Hermes  │ ───────────────► │ antigravity-bridge │ ────────► │ cloudcode-pa.google   │
-│  WebUI   │   /v1/chat/...   │  Flask :PORT       │  Bearer   │ :loadCodeAssist      │
-│  Boba    │                  │                    │  +project │ :generateContent     │
-└──────────┘                  └────────────────────┘           │ :streamGenerateContent│
-                                                               └──────────────────────┘
+┌─────────────┐    OpenAI API      ┌────────────────────┐    HTTPS    ┌─────────────────────────┐
+│   Hermes    │ ─────────────────► │  Antigravity       │ ──────────► │  cloudcode-pa.google    │
+│  Open WebUI │   /v1/chat/...     │  Bridge :PORT      │   Bearer   │  :loadCodeAssist        │
+│    Boba     │                    │                    │  + project │  :generateContent       │
+│  Continue   │                    │                    │            │  :streamGenerateContent │
+└─────────────┘                    └────────────────────┘            └─────────────────────────┘
 ```
 
-## Quick start
+---
+
+## 📋 Requirements
+
+| Requirement | Details |
+|-------------|---------|
+| **Python** | 3.10 or newer |
+| **OS** | Linux (systemd recommended) or macOS |
+| **Antigravity account** | Already signed in through OpenCode / the Antigravity IDE extension |
+| **Credential files** | The installer checks these default paths (you can override them with environment variables): |
+
+```text
+~/.cache/opencode/packages/opencode-antigravity-auth@latest/node_modules/opencode-antigravity-auth/dist/src/constants.js
+~/.config/opencode/antigravity-accounts.json
+~/.local/share/opencode/auth.json
+```
+
+If any file is missing, the installer warns you but lets you continue — the bridge simply cannot authenticate without them.
+
+---
+
+## 🚀 Quick install
 
 ```bash
 git clone https://github.com/lomeliDev/antigravity-bridge.git
@@ -34,176 +70,162 @@ cd antigravity-bridge
 ./install.sh
 ```
 
-The installer will ask for a **port** and an optional **API key**, then render a systemd service file.
+The installer will:
+
+1. Check Python 3.10+ and create a virtual environment.
+2. Install Python dependencies.
+3. Validate your Antigravity credential files.
+4. Ask for a **port** (default `8080`).
+5. Ask whether to enable an **API key** (generates a random one by default).
+6. Detect your platform and install a **systemd** (Linux) or **launchd** (macOS) daemon automatically.
+7. Run health / models validation tests.
+
+### Manual run (fallback)
+
+If the installer cannot install a daemon, it creates a portable runner:
 
 ```bash
-# Linux with systemd
-sudo cp antigravity-bridge.service.rendered /etc/systemd/system/antigravity-bridge.service
-sudo systemctl daemon-reload
-sudo systemctl enable --now antigravity-bridge
+./daemon/run.sh
 ```
 
+Or run directly:
+
 ```bash
-# macOS or Linux without systemd
 source .env
-.venv/bin/python3 server.py
+.venv/bin/python3 server.py --host 0.0.0.0 --port 8080
 ```
 
-## Configure Hermes / Open WebUI
+---
 
-| Field    | Value                                         |
-|----------|-----------------------------------------------|
-| Base URL | `http://YOUR_SERVER_IP:PORT/v1`               |
-| API key  | `sk-local` or your `BRIDGE_API_KEY`           |
-| Models   | Automatically fetched from `GET /v1/models`   |
+## ⚙️ Configuration
 
-## Supported OpenAI features
+The bridge is configured through environment variables. The installer writes them to `.env`.
 
-- `POST /v1/chat/completions` (blocking + SSE streaming)
-- `GET /v1/models` and `GET /v1/models/{id}`
-- Tool/functions (`tools`, `tool_choice`, multi-turn `role: "tool"`)
-- Images in messages (`image_url` with base64 data URI or http(s) URL)
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `HOST` | `127.0.0.1` | Listen host |
+| `PORT` | `8080` | Listen port |
+| `BRIDGE_API_KEY` | *(none)* | Optional API key required from clients (`Authorization: Bearer <key>`) |
+| `ANTIGRAVITY_CONST` | `~/.cache/opencode/.../constants.js` | OAuth client id/secret |
+| `ANTIGRAVITY_ACCOUNTS` | `~/.config/opencode/antigravity-accounts.json` | Account + refresh token |
+| `ANTIGRAVITY_AUTH` | `~/.local/share/opencode/auth.json` | Cached access token + project id |
+
+Edit `.env` and restart the service to apply changes:
+
+```bash
+# Linux
+sudo systemctl restart antigravity-bridge
+
+# macOS
+launchctl stop com.lomelidev.antigravity-bridge
+launchctl start com.lomelidev.antigravity-bridge
+```
+
+---
+
+## 🔌 Connect your client
+
+Point your OpenAI-compatible client to the bridge:
+
+| Field | Value |
+|-------|-------|
+| **Base URL** | `http://YOUR_SERVER_IP:PORT/v1` |
+| **API key** | Your `BRIDGE_API_KEY` value, or any non-empty string if auth is disabled |
+| **Models** | Fetched automatically from `GET /v1/models` |
+
+### Hermes example
+
+```json
+{
+  "api_type": "openai",
+  "base_url": "http://127.0.0.1:8080/v1",
+  "api_key": "sk-local-or-your-bridge-key",
+  "model": "gemini-2.5-flash"
+}
+```
+
+### Open WebUI example
+
+1. Go to **Admin Panel → Settings → Connections**.
+2. Add an OpenAI API connection.
+3. Set **URL** to `http://YOUR_SERVER_IP:PORT/v1`.
+4. Set **Key** to your `BRIDGE_API_KEY` (or any placeholder if auth is disabled).
+5. Save — the model list will populate automatically.
+
+---
+
+## 🧩 Supported features
+
+- `GET /health`
+- `GET /v1/models` and `GET /v1/models/{id}` (dynamically fetched from Antigravity)
+- `POST /v1/chat/completions` (blocking and SSE streaming)
+- Tools / functions (`tools`, `tool_choice`, multi-turn `role: "tool"`)
+- Vision (`image_url` with base64 data URI or public http(s) URL)
 - `response_format` (`json_object` and `json_schema`)
 - `seed`, `max_tokens`, `max_completion_tokens`, `n`, `stop`, `temperature`, `top_p`
 - `stream_options.include_usage`
 - Optional `BRIDGE_API_KEY` client authentication
 
-## Configuration
-
-| Variable              | Default                                                                 | Purpose                         |
-|-----------------------|-------------------------------------------------------------------------|---------------------------------|
-| `HOST`                | `127.0.0.1`                                                             | Listen host                     |
-| `PORT`                | `8080`                                                                  | Listen port                     |
-| `BRIDGE_API_KEY`      | *(none)*                                                                | Optional client API key         |
-| `ANTIGRAVITY_CONST`   | `~/.cache/opencode/packages/opencode-antigravity-auth@latest/.../constants.js` | OAuth client credentials        |
-| `ANTIGRAVITY_ACCOUNTS`| `~/.config/opencode/antigravity-accounts.json`                          | Account + refresh token         |
-| `ANTIGRAVITY_AUTH`    | `~/.local/share/opencode/auth.json`                                     | Cached access token + projectId |
-
-## Quick tests
-
-```bash
-# Health
-curl -s http://127.0.0.1:8081/health | jq
-
-# Models
-curl -s http://127.0.0.1:8081/v1/models | jq '.data[].id'
-
-# Chat
-curl -s http://127.0.0.1:8081/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{"model":"gemini-2.5-flash","messages":[{"role":"user","content":"hello"}]}' | jq
-
-# Streaming
-curl -N http://127.0.0.1:8081/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{"model":"gemini-2.5-flash","stream":true,"messages":[{"role":"user","content":"tell me a joke"}]}'
-```
-
-## Limitations
-
-- `logprobs` / `top_logprobs` are not supported by the Antigravity upstream.
-- `frequency_penalty`, `presence_penalty`, `logit_bias` are ignored.
-- `n > 1` only works on models that allow multiple candidates.
-- PDF/audio/video are not supported via the standard OpenAI chat-completion format.
+> **Note:** `logprobs`, `frequency_penalty`, `presence_penalty`, and `logit_bias` are not supported by the Antigravity upstream and are silently ignored.
 
 ---
 
-<h1 id="español" align="center">Antigravity Bridge</h1>
+## 🧪 API quick tests
+
+```bash
+BASE=http://127.0.0.1:8080
+KEY="your-bridge-api-key-or-empty"
+AUTH=""
+[ -n "$KEY" ] && AUTH="-H Authorization: Bearer $KEY"
+
+# Health check
+curl -s $AUTH "$BASE/health" | jq
+
+# List models
+curl -s $AUTH "$BASE/v1/models" | jq '.data[].id'
+
+# Chat completion
+curl -s "$BASE/v1/chat/completions" \
+  $AUTH \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "gemini-2.5-flash",
+    "messages": [{"role": "user", "content": "hello"}]
+  }' | jq
+
+# Streaming
+curl -N "$BASE/v1/chat/completions" \
+  $AUTH \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "gemini-2.5-flash",
+    "stream": true,
+    "messages": [{"role": "user", "content": "tell me a joke"}]
+  }'
+```
+
+---
+
+## 🛠️ Troubleshooting
+
+| Problem | Solution |
+|---------|----------|
+| `No Antigravity credentials found` | Sign in to the Antigravity / OpenCode extension at least once so it writes the credential files listed in [Requirements](#requirements). |
+| Port already in use | Pick a different port during install or stop the other service. |
+| `401 Unauthorized` | Set `Authorization: Bearer <BRIDGE_API_KEY>` in your client, or disable the API key in `.env`. |
+| Models list is empty | The bridge could not refresh the Antigravity token. Check `bridge.log` and verify the credential files are valid. |
+| Service fails to start | Run the bridge manually to see the error: `source .env && .venv/bin/python3 server.py` |
+
+---
+
+## 📄 License
+
+[MIT](LICENSE) © [@lomeliDev](https://github.com/lomeliDev)
+
+---
 
 <div align="center">
 
-[English](#what-is-it) | **Español**
-
-Un pequeño **bridge HTTP compatible con OpenAI** que envuelve tu cuenta de **Antigravity / Gemini Code Assist** con OAuth de Google, para que clientes como **Hermes**, **Open WebUI**, **Boba**, **BetterGPT**, etc. puedan usarla.
+**Made with 💜 so you can use Antigravity everywhere.**
 
 </div>
-
----
-
-## ¿Qué es?
-
-Tu cuenta de Antigravity ya está autorizada y guarda tokens válidos en `~/.local/share/opencode/auth.json`, pero no hay un endpoint estándar de OpenAI para consumirla. Este bridge cierra ese hueco.
-
-## Inicio rápido
-
-```bash
-git clone https://github.com/lomeliDev/antigravity-bridge.git
-cd antigravity-bridge
-./install.sh
-```
-
-El instalador pedirá un **puerto** y una **API key** opcional, luego generará un archivo de servicio systemd.
-
-```bash
-# Linux con systemd
-sudo cp antigravity-bridge.service.rendered /etc/systemd/system/antigravity-bridge.service
-sudo systemctl daemon-reload
-sudo systemctl enable --now antigravity-bridge
-```
-
-```bash
-# macOS o Linux sin systemd
-source .env
-.venv/bin/python3 server.py
-```
-
-## Configurar Hermes / Open WebUI
-
-| Campo     | Valor                                          |
-|-----------|------------------------------------------------|
-| Base URL  | `http://IP_DE_TU_SERVIDOR:PUERTO/v1`           |
-| API key   | `sk-local` o tu `BRIDGE_API_KEY`               |
-| Modelos   | Se obtienen automáticamente de `GET /v1/models`|
-
-## Características soportadas
-
-- `POST /v1/chat/completions` (bloqueante + streaming SSE)
-- `GET /v1/models` y `GET /v1/models/{id}`
-- Tools/functions (`tools`, `tool_choice`, multi-turn `role: "tool"`)
-- Imágenes en mensajes (`image_url` con data URI base64 o URL http(s))
-- `response_format` (`json_object` y `json_schema`)
-- `seed`, `max_tokens`, `max_completion_tokens`, `n`, `stop`, `temperature`, `top_p`
-- `stream_options.include_usage`
-- Autenticación opcional de clientes con `BRIDGE_API_KEY`
-
-## Configuración
-
-| Variable              | Valor por defecto                                                       | Propósito                       |
-|-----------------------|-------------------------------------------------------------------------|---------------------------------|
-| `HOST`                | `127.0.0.1`                                                             | Host de escucha                 |
-| `PORT`                | `8080`                                                                  | Puerto de escucha               |
-| `BRIDGE_API_KEY`      | *(ninguna)*                                                             | API key opcional para clientes  |
-| `ANTIGRAVITY_CONST`   | `~/.cache/opencode/packages/opencode-antigravity-auth@latest/.../constants.js` | Credenciales OAuth              |
-| `ANTIGRAVITY_ACCOUNTS`| `~/.config/opencode/antigravity-accounts.json`                          | Cuenta + refresh token          |
-| `ANTIGRAVITY_AUTH`    | `~/.local/share/opencode/auth.json`                                     | Access token + projectId cache  |
-
-## Tests rápidos
-
-```bash
-# Health
-curl -s http://127.0.0.1:8081/health | jq
-
-# Modelos
-curl -s http://127.0.0.1:8081/v1/models | jq '.data[].id'
-
-# Chat
-curl -s http://127.0.0.1:8081/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{"model":"gemini-2.5-flash","messages":[{"role":"user","content":"hola"}]}' | jq
-
-# Streaming
-curl -N http://127.0.0.1:8081/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{"model":"gemini-2.5-flash","stream":true,"messages":[{"role":"user","content":"cuentame un chiste"}]}'
-```
-
-## Limitaciones
-
-- `logprobs` / `top_logprobs` no son soportados por el upstream de Antigravity.
-- `frequency_penalty`, `presence_penalty`, `logit_bias` se ignoran.
-- `n > 1` solo funciona en modelos que permiten múltiples candidatos.
-- PDF/audio/video no son soportados por el formato estándar de chat completions de OpenAI.
-
-## Licencia
-
-MIT
