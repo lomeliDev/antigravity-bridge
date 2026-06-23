@@ -16,6 +16,7 @@ Built for agents and clients that do **not** support Google OAuth directly: **He
 
 ## 📖 Table of contents
 
+- [TL;DR](#tldr)
 - [What is it?](#what-is-it)
 - [Quick install](#quick-install)
 - [Before you begin](#before-you-begin)
@@ -28,8 +29,26 @@ Built for agents and clients that do **not** support Google OAuth directly: **He
   - [Generic OpenAI client](#generic-openai-client)
 - [Supported features](#supported-features)
 - [API quick tests](#api-quick-tests)
+- [Common mistakes](#common-mistakes)
 - [Troubleshooting](#troubleshooting)
 - [License](#license)
+
+---
+
+## ⚡ TL;DR
+
+Run this **one command**. It installs everything, logs you in, and starts the bridge as a service:
+
+```bash
+git clone https://github.com/lomeliDev/antigravity-bridge.git && \
+cd antigravity-bridge && \
+chmod +x install.sh scripts/*.sh && \
+./install.sh
+```
+
+When the installer asks, just press **Enter** to accept the defaults. It will open your browser for Google OAuth when needed.
+
+> **You do NOT need to run `agy login` or `opencode auth login` yourself.** The installer does it for you.
 
 ---
 
@@ -61,9 +80,9 @@ The installer will:
 
 1. Install the OpenCode CLI if it is missing.
 2. Install the Antigravity CLI (`agy`) if it is missing.
-3. Guide you through `agy login` if no session exists.
+3. Run `agy login` for you if no session exists. *(A browser tab will open — just log in.)*
 4. Add the `opencode-antigravity-auth` plugin to OpenCode if it is missing.
-5. Guide you through `opencode auth login` if no Google OAuth credential exists.
+5. Run `opencode auth login` for you if no Google OAuth credential exists. *(Another browser tab — same account.)*
 6. Validate the Antigravity credential files.
 7. Check Python 3.10+ and create a virtual environment.
 8. Install Python dependencies.
@@ -72,8 +91,7 @@ The installer will:
 11. Detect your platform and install a **systemd** (Linux) or **launchd** (macOS) daemon automatically.
 12. Run health / models validation tests.
 
-> The installer handles everything for you, including the `agy login` and `opencode auth login` OAuth flows. You only need to follow the on-screen prompts.
-> If you prefer to set up the prerequisites manually, see [Requirements](#requirements) and [Before you begin](#before-you-begin).
+> **Do not run `agy login` or `opencode auth login` before `./install.sh`.** The installer handles the OAuth flows. If you already did them, the installer will detect them and skip those steps.
 
 ### Manual run (fallback)
 
@@ -96,7 +114,7 @@ source .env
 
 The bridge **reuses** the Google OAuth session created by OpenCode. You must complete these steps **once** before the bridge can authenticate with Antigravity.
 
-The installer can do most of this for you, but here is the full flow:
+**You can skip this section if you run `./install.sh`.** The installer does everything below automatically. This section is only for people who want to set things up manually.
 
 ### 1. Install the OpenCode CLI
 
@@ -113,8 +131,6 @@ agy --version
 ```
 
 ### 3. Log in with `agy`
-
-This creates the Antigravity session on your machine:
 
 ```bash
 agy login
@@ -133,8 +149,6 @@ cat > ~/.config/opencode/opencode.json <<'EOF'
 EOF
 ```
 
-> The plugin lives at `~/.cache/opencode/packages/opencode-antigravity-auth@latest/...` and provides the OAuth client id/secret the bridge needs.
-
 ### 5. Log in with OpenCode
 
 ```bash
@@ -144,7 +158,7 @@ opencode auth login
 Select:
 
 - **Provider:** `Google`
-- **Method:** `OAuth with Google (Antigravity)`
+- **Method:** `OAuth with Google (Antigravity)**
 
 Sign in with the **same** Google account you used for `agy login`.
 
@@ -165,8 +179,6 @@ After login you will have:
 ~/.config/opencode/antigravity-accounts.json
 ~/.local/share/opencode/auth.json
 ```
-
-The installer checks these paths automatically.
 
 ---
 
@@ -367,6 +379,19 @@ curl -N "$BASE/v1/chat/completions" \
     "messages": [{"role": "user", "content": "tell me a joke"}]
   }'
 ```
+
+---
+
+## 🚫 Common mistakes
+
+| Mistake | Why it fails | What to do |
+|---------|--------------|------------|
+| Running `agy login` or `opencode auth login` manually before `./install.sh` | Nothing breaks, but it is unnecessary. The installer does it automatically and skips the steps if it detects a session. | Just run `./install.sh`. |
+| Closing the terminal during the browser OAuth flow | The installer waits for you to come back. If you close it, the login never finishes. | Re-run `./install.sh`. |
+| Running `./install.sh` with `sudo` | The bridge will be configured for `root` and the service will run as `root`, which is usually not what you want. | Run as your normal user. |
+| Picking a port that is already in use | The bridge cannot start. | Re-run `./install.sh` and choose a different port, or stop the other service. |
+| Forgetting the `BRIDGE_API_KEY` when connecting a client | You get `401 Unauthorized`. | Copy the key from `.env` or disable auth by removing `BRIDGE_API_KEY` from `.env`. |
+| Using a different Google account for `agy login` and `opencode auth login` | The credentials may not match and the bridge can fail to refresh tokens. | Use the **same** Google account for both logins. |
 
 ---
 
