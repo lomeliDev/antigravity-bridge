@@ -53,6 +53,7 @@ Your Antigravity / OpenCode IDE extension is already authenticated and keeps val
 ```bash
 git clone https://github.com/lomeliDev/antigravity-bridge.git
 cd antigravity-bridge
+chmod +x install.sh scripts/*.sh
 ./install.sh
 ```
 
@@ -220,6 +221,7 @@ The bridge is meant to be consumed by agents and clients that do not support Goo
 Run the helper script after `./install.sh`:
 
 ```bash
+chmod +x scripts/add-to-hermes.sh
 ./scripts/add-to-hermes.sh
 ```
 
@@ -257,6 +259,7 @@ Then start Hermes and switch models with:
 Run the helper script after `./install.sh`:
 
 ```bash
+chmod +x scripts/add-to-openclaw.sh
 ./scripts/add-to-openclaw.sh
 ```
 
