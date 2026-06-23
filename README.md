@@ -261,7 +261,14 @@ model:
   default: gemini-2.5-flash
 ```
 
-Then start Hermes and switch models with:
+Restart Hermes so it reads the updated config:
+
+```bash
+hermes gateway restart     # if you use the Hermes gateway
+# or close and reopen Hermes if you use the CLI/TUI
+```
+
+Then switch models with:
 
 ```bash
 /model custom:antigravity-bridge:gemini-2.5-flash
