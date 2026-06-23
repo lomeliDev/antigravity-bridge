@@ -50,19 +50,35 @@ Your Antigravity / OpenCode IDE extension is already authenticated and keeps val
 
 ## 🎯 Before you begin
 
-The bridge **reuses** the Google OAuth session created by OpenCode. You must complete these steps **once** before installing the bridge:
+The bridge **reuses** the Google OAuth session created by OpenCode. You must complete these steps **once** before the bridge can authenticate with Antigravity.
+
+The installer can do most of this for you, but here is the full flow:
 
 ### 1. Install the OpenCode CLI
 
-Download and install it from [opencode.ai](https://opencode.ai), then verify it is on your `PATH`:
-
 ```bash
+curl -fsSL https://opencode.ai/install | bash
 opencode --version
 ```
 
-### 2. Install the Antigravity auth plugin
+### 2. Install the Antigravity CLI (`agy`)
 
-Add the official plugin to your OpenCode config. The installer can do this for you, or you can do it manually:
+```bash
+curl -fsSL https://antigravity.google/cli/install.sh | bash
+agy --version
+```
+
+### 3. Log in with `agy`
+
+This creates the Antigravity session on your machine:
+
+```bash
+agy login
+```
+
+> If your version of `agy` does not have a `login` subcommand, just run `agy` and complete the first-run OAuth wizard.
+
+### 4. Add the Antigravity auth plugin to OpenCode
 
 ```bash
 mkdir -p ~/.config/opencode
@@ -75,9 +91,7 @@ EOF
 
 > The plugin lives at `~/.cache/opencode/packages/opencode-antigravity-auth@latest/...` and provides the OAuth client id/secret the bridge needs.
 
-### 3. Log in with Google
-
-Run the OpenCode auth wizard and choose the Antigravity OAuth flow:
+### 5. Log in with OpenCode
 
 ```bash
 opencode auth login
@@ -88,7 +102,9 @@ Select:
 - **Provider:** `Google`
 - **Method:** `OAuth with Google (Antigravity)`
 
-Sign in with the Google account that has Antigravity access. When the browser flow finishes, verify the credential is stored:
+Sign in with the **same** Google account you used for `agy login`.
+
+### 6. Verify the credential was stored
 
 ```bash
 opencode auth list
@@ -96,7 +112,7 @@ opencode auth list
 
 You should see a `Google oauth` entry.
 
-### 4. Where the credential files live
+### 7. Where the credential files live
 
 After login you will have:
 
@@ -116,8 +132,10 @@ The installer checks these paths automatically.
 |-------------|---------|
 | **Python** | 3.10 or newer |
 | **OS** | Linux (systemd recommended) or macOS |
-| **OpenCode CLI** | Installed and authenticated (see [Before you begin](#before-you-begin)) |
+| **OpenCode CLI** | Installed (`curl -fsSL https://opencode.ai/install \| bash`) |
+| **Antigravity CLI** | Installed and logged in (`agy login`) |
 | **Antigravity auth plugin** | `opencode-antigravity-auth` configured in `~/.config/opencode/opencode.json` |
+| **OpenCode auth** | `opencode auth login` completed with Google → OAuth with Google (Antigravity) |
 | **Credential files** | The three files listed above must exist |
 
 If any prerequisite is missing, the installer stops and tells you exactly what to do.
@@ -134,13 +152,18 @@ cd antigravity-bridge
 
 The installer will:
 
-1. Check the OpenCode CLI, the Antigravity auth plugin, and the credential files.
-2. Check Python 3.10+ and create a virtual environment.
-3. Install Python dependencies.
-4. Ask for a **port** (default `8080`).
-5. Ask whether to enable an **API key** (generates a random one by default).
-6. Detect your platform and install a **systemd** (Linux) or **launchd** (macOS) daemon automatically.
-7. Run health / models validation tests.
+1. Install the OpenCode CLI if it is missing.
+2. Install the Antigravity CLI (`agy`) if it is missing.
+3. Guide you through `agy login` if no session exists.
+4. Add the `opencode-antigravity-auth` plugin to OpenCode if it is missing.
+5. Guide you through `opencode auth login` if no Google OAuth credential exists.
+6. Validate the Antigravity credential files.
+7. Check Python 3.10+ and create a virtual environment.
+8. Install Python dependencies.
+9. Ask for a **port** (default `8080`).
+10. Ask whether to enable an **API key / password** (generates a random one by default).
+11. Detect your platform and install a **systemd** (Linux) or **launchd** (macOS) daemon automatically.
+12. Run health / models validation tests.
 
 ### Manual run (fallback)
 
