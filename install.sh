@@ -380,12 +380,8 @@ echo ""
 echo -e "${CYAN}Just press Enter to accept the defaults when prompted.${RESET}"
 echo ""
 
-check_opencode_prerequisites
-
-info "Detected platform: ${DETECTED_OS} (${DETECTED_INIT})"
-
 # ---------------------------------------------------------------------------
-# Python check
+# Python check (needed early for the prerequisite helpers)
 # ---------------------------------------------------------------------------
 if ! command -v python3 >/dev/null 2>&1; then
     error "python3 was not found. Please install Python 3.10 or newer and try again."
@@ -399,6 +395,10 @@ if [[ "$PY_MAJOR" -lt 3 ]] || { [[ "$PY_MAJOR" -eq 3 ]] && [[ "$PY_MINOR" -lt 10
     exit 1
 fi
 success "Python ${PY_MAJOR}.${PY_MINOR} is ready."
+
+check_opencode_prerequisites
+
+info "Detected platform: ${DETECTED_OS} (${DETECTED_INIT})"
 
 # ---------------------------------------------------------------------------
 # Virtual environment & dependencies
