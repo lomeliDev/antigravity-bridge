@@ -268,7 +268,7 @@ hermes gateway restart     # if you use the Hermes gateway
 # or close and reopen Hermes if you use the CLI/TUI
 ```
 
-Then pick the provider in the Hermes panel, or run:
+> **Important:** make sure you select the **bridge** provider/model, not another provider that also offers `gemini-2.5-flash`. If the status bar shows a different provider (for example `Nous Research`), you are not using the bridge. Pick the provider in the Hermes panel, or run:
 
 ```bash
 /model custom:antigravity-bridge:gemini-2.5-flash

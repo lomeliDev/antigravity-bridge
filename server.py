@@ -499,6 +499,43 @@ def _is_claude_model(model_id: str) -> bool:
     return model_id.lower().startswith("claude-")
 
 
+def _normalize_tool_parameters(parameters: Any) -> dict[str, Any]:
+    """Return a Gemini-compatible JSON schema for function parameters.
+
+    Some clients send {'schema': {...}, 'strict': True, ...} instead of a
+    plain JSON schema. Gemini expects the schema directly under 'parameters',
+    so we unwrap 'schema' and strip unsupported fields.
+    """
+    if not isinstance(parameters, dict):
+        return {"type": "object", "properties": {}}
+
+    # Unwrap nested schema if present.
+    if isinstance(parameters.get("schema"), dict):
+        parameters = parameters["schema"]
+
+    # Build a clean schema object. Gemini only reliably supports type,
+    # properties, required, description, enum and items.
+    clean: dict[str, Any] = {"type": parameters.get("type", "object")}
+    if "properties" in parameters:
+        clean["properties"] = parameters["properties"]
+    if "required" in parameters:
+        clean["required"] = parameters["required"]
+    if "description" in parameters:
+        clean["description"] = parameters["description"]
+    if "items" in parameters:
+        clean["items"] = parameters["items"]
+    if "enum" in parameters:
+        clean["enum"] = parameters["enum"]
+
+    # Default to object if no properties were supplied.
+    if "type" not in clean:
+        clean["type"] = "object"
+    if clean.get("type") == "object" and "properties" not in clean:
+        clean["properties"] = {}
+
+    return clean
+
+
 def oai_tools_to_antigravity(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Convert OpenAI tools [{type:function, function:{...}}] to Gemini format."""
     declarations: list[dict[str, Any]] = []
@@ -511,7 +548,7 @@ def oai_tools_to_antigravity(tools: list[dict[str, Any]]) -> list[dict[str, Any]
         name = fn.get("name")
         if not name:
             continue
-        parameters = fn.get("parameters") or {"type": "object", "properties": {}}
+        parameters = _normalize_tool_parameters(fn.get("parameters"))
         declarations.append({
             "name": name,
             "description": fn.get("description", ""),
