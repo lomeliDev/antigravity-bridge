@@ -275,6 +275,12 @@ chmod +x scripts/add-to-openclaw.sh
 ./scripts/add-to-openclaw.sh
 ```
 
+You can pass a different provider name and model if you already have other OAuth plugins:
+
+```bash
+./scripts/add-to-openclaw.sh gemini-2.5-flash my-antigravity
+```
+
 It edits `~/.openclaw/openclaw.json` (creating it if necessary) and adds the bridge as a custom provider:
 
 ```json
