@@ -134,17 +134,16 @@ if set_active:
     model_section["provider"] = provider_name
     model_section["default"] = model
 
-# If the active provider points to our named provider, remove any stale
-# global custom base_url/api_key. Hermes sometimes auto-fills OpenRouter's
-# URL here when the provider name is 'custom' or the model is not found.
-if model_section.get("provider") == provider_name:
-    removed = []
-    for key in ("base_url", "api_key"):
-        if key in model_section:
-            del model_section[key]
-            removed.append(key)
-    if removed:
-        print(f"Removed stale model.{', '.join(removed)} so provider '{provider_name}' is used")
+# Always remove stale global base_url/api_key from model section.
+# Hermes sometimes auto-fills OpenRouter's URL here when the provider
+# name is 'custom' or the model is not found in the listing.
+removed = []
+for key in ("base_url", "api_key", "api_mode"):
+    if key in model_section:
+        del model_section[key]
+        removed.append(key)
+if removed:
+    print(f"Removed stale model.{', '.join(removed)} — provider '{provider_name}' handles auth.")
 
 with open(config_path, "w") as f:
     yaml.dump(data, f, default_flow_style=False, sort_keys=False, allow_unicode=True)
@@ -157,6 +156,11 @@ if final_provider != provider_name:
 if "openrouter" in str(final_base_url).lower():
     print(f"WARNING: model.base_url still points to OpenRouter ({final_base_url}).")
     print("         Remove it manually or the bridge will not be used.")
+if "openrouter" in str(final_base_url).lower() or final_provider != provider_name:
+    print("")
+    print("TIP: If Hermes TUI shows 'Provider: Custom endpoint' with OpenRouter,")
+    print("     run this script again or manually set in config.yaml:")
+    print(f"       model.provider: {provider_name}")
 
 print(f"Updated {config_path}")
 PY
@@ -173,30 +177,77 @@ else
 fi
 echo ""
 
-# Restart Hermes gateway so it picks up the new custom provider.
-read -rp "Restart Hermes gateway now? [Y/n]: " RESTART_ANSWER
+# ── Restart all Hermes components so they pick up the new provider ──
+read -rp "Restart Hermes components now? [Y/n]: " RESTART_ANSWER
 RESTART_ANSWER="${RESTART_ANSWER:-Y}"
 if [[ "$RESTART_ANSWER" =~ ^[Yy] ]]; then
     echo ""
-    echo "Restarting Hermes gateway ..."
-    # Try hermes CLI first (cross-platform), then systemctl (Linux), then launchctl (macOS).
+    echo "Restarting Hermes components ..."
+    RESTART_ERRORS=0
+
+    # 1) Gateway
+    echo -n "  Gateway ... "
     if hermes gateway restart 2>/dev/null; then
-        echo "Hermes gateway restarted via hermes CLI."
+        echo "✔ restarted"
     elif systemctl restart hermes-gateway 2>/dev/null; then
-        echo "Hermes gateway restarted via systemctl."
+        echo "✔ restarted (systemctl)"
     elif [[ "$EUID" -eq 0 ]]; then
-        echo "Running as root — restarting gateway process directly ..."
         pkill -f "hermes gateway" 2>/dev/null || true
         sleep 2
         nohup hermes gateway > /dev/null 2>&1 &
-        echo "Gateway restarted in background."
+        echo "✔ restarted (direct)"
     else
-        echo "Could not restart Hermes gateway automatically."
-        echo "Please restart it manually and re-run this script."
+        echo "⚠ skipped (not running or not found)"
+        ((RESTART_ERRORS++)) || true
+    fi
+
+    # 2) Dashboard
+    echo -n "  Dashboard ... "
+    if hermes dashboard restart 2>/dev/null; then
+        echo "✔ restarted"
+    elif systemctl restart hermes-dashboard 2>/dev/null; then
+        echo "✔ restarted (systemctl)"
+    elif pkill -f "hermes dashboard" 2>/dev/null; then
+        sleep 1
+        nohup hermes dashboard --host 0.0.0.0 --port 9119 --no-open > /dev/null 2>&1 &
+        echo "✔ restarted (direct)"
+    else
+        echo "⚠ skipped (not running or not found)"
+        ((RESTART_ERRORS++)) || true
+    fi
+
+    # 3) WebUI
+    echo -n "  WebUI ... "
+    if systemctl restart hermes-webui 2>/dev/null; then
+        echo "✔ restarted (systemctl)"
+    elif pkill -f "hermes-webui/server.py" 2>/dev/null; then
+        sleep 1
+        echo "✔ killed (restart manually if needed)"
+    else
+        echo "⚠ skipped (not running or not found)"
+        ((RESTART_ERRORS++)) || true
+    fi
+
+    # 4) Any remaining TUI sessions — notify the user, don't kill them
+    TUI_COUNT=$(pgrep -cf "tui_gateway\|ui-tui" 2>/dev/null || echo 0)
+    if [[ "$TUI_COUNT" -gt 0 ]]; then
+        echo "  TUI      ... ⚠ $TUI_COUNT session(s) still running — close/reopen them to pick up the new provider"
+    else
+        echo "  TUI      ... ⚪ no active sessions"
+    fi
+
+    echo ""
+    if [[ "$RESTART_ERRORS" -gt 0 ]]; then
+        echo "⚠ $RESTART_ERRORS component(s) could not be restarted (may not be installed)."
+        echo "  The provider config is saved — components will pick it up on next start."
+    else
+        echo "✔ All Hermes components restarted."
     fi
 else
-    echo "Skipped Hermes gateway restart. Remember to restart it manually:"
+    echo "Skipped Hermes restart. Remember to restart manually:"
     echo "  hermes gateway restart"
+    echo "  hermes dashboard restart"
+    echo "  systemctl restart hermes-webui   # if installed"
 fi
 
 echo ""
