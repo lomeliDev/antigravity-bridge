@@ -257,6 +257,8 @@ providers:
     models:
       - id: gemini-2.5-flash
         name: gemini-2.5-flash
+      # Tip: the bridge exposes 14 models via /v1/models.
+      # You only need one default here — Hermes discovers the rest.
 
 model:
   provider: antigravity-bridge
@@ -278,6 +280,40 @@ If you prefer not to activate the bridge immediately, answer `n` when the script
 
 ```bash
 /model antigravity-bridge:gemini-2.5-flash
+```
+
+#### Switching models
+
+The bridge lists 14 models automatically via `/v1/models`. You can switch to any of them in Hermes:
+
+```bash
+# Fast / cheap
+/model antigravity-bridge:gemini-2.5-flash-lite
+/model antigravity-bridge:gemini-3.1-flash-lite
+
+# Balanced
+/model antigravity-bridge:gemini-2.5-flash
+/model antigravity-bridge:gemini-3-flash
+
+# Thinking / reasoning
+/model antigravity-bridge:gemini-2.5-flash-thinking
+
+# Pro (larger context, better for complex tasks)
+/model antigravity-bridge:gemini-3.1-pro-low
+
+# Claude models
+/model antigravity-bridge:claude-sonnet-4-6
+/model antigravity-bridge:claude-opus-4-6-thinking
+
+# GPT model
+/model antigravity-bridge:gpt-oss-120b-medium
+```
+
+Or from the CLI:
+
+```bash
+hermes -z "explain quantum computing" -m claude-sonnet-4-6 --provider antigravity-bridge
+hermes -z "write a poem" -m gemini-2.5-flash-thinking --provider antigravity-bridge
 ```
 
 ### OpenClaw
@@ -416,6 +452,7 @@ curl -N "$BASE/v1/chat/completions" \
 | Picking a port that is already in use | The bridge cannot start. | Re-run `./install.sh` and choose a different port, or stop the other service. |
 | Forgetting the `BRIDGE_API_KEY` when connecting a client | You get `401 Unauthorized`. | Copy the key from `.env` or disable auth by removing `BRIDGE_API_KEY` from `.env`. |
 | Using a different Google account for `agy login` and `opencode auth login` | The credentials may not match and the bridge can fail to refresh tokens. | Use the **same** Google account for both logins. |
+| `hermes gateway restart` fails with "Refusing to install as root" | Hermes guards against running its service as root by default. | Use `hermes gateway restart --run-as-user root` or restart manually: `pkill -f 'hermes gateway' && hermes gateway &` |
 
 ---
 
