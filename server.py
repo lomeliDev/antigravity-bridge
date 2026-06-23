@@ -402,12 +402,26 @@ def _apply_response_format(body: dict[str, Any], generation_config: dict[str, An
             generation_config["responseSchema"] = _clean_gemini_schema(schema)
 
 
+def _model_max_output_tokens(model_id: str) -> int:
+    """Return the max output tokens for known Gemini models."""
+    mid = (model_id or "").lower()
+    if "flash" in mid and "thinking" not in mid:
+        return 8192
+    if "flash-thinking" in mid or "thinking" in mid:
+        return 65536
+    if "pro" in mid:
+        return 65536
+    return 8192  # safe default
+
+
 def build_gemini_request(model: str, body: dict[str, Any], contents: list, system_instr: str) -> dict[str, Any]:
     # Antigravity expects the model id without the "models/" prefix.
     model_id = model[7:] if model.startswith("models/") else model
+    raw_max_tokens = body.get("max_completion_tokens") or body.get("max_tokens", 8192)
+    max_output = min(int(raw_max_tokens), _model_max_output_tokens(model_id))
     generation_config: dict[str, Any] = {
         "temperature": body.get("temperature", 1.0),
-        "maxOutputTokens": body.get("max_completion_tokens") or body.get("max_tokens", 8192),
+        "maxOutputTokens": max_output,
         "topP": body.get("top_p", 0.95),
     }
     if "seed" in body and isinstance(body["seed"], int):
@@ -550,6 +564,42 @@ _EMPTY_SCHEMA_PLACEHOLDER = "_placeholder"
 _EMPTY_SCHEMA_DESCRIPTION = "Placeholder. Always pass true."
 
 
+def _log_failed_request(gemini_req: dict[str, Any], status_code: int, response_text: str) -> None:
+    """Log a failing upstream request to disk for post-mortem debugging."""
+    try:
+        sanitized = json.loads(json.dumps(gemini_req))
+        # Truncate huge content blobs
+        if "request" in sanitized:
+            req = sanitized["request"]
+            if isinstance(req.get("contents"), list):
+                req["contents"] = f"<{len(req['contents'])} contents>"
+            if isinstance(req.get("systemInstruction"), dict):
+                si_text = json.dumps(req["systemInstruction"])
+                req["systemInstruction"] = f"<systemInstruction: {len(si_text)} chars>"
+        dump = {
+            "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "status_code": status_code,
+            "response": response_text[:5000],
+            "request": sanitized,
+            "tools_summary": [],
+        }
+        tools = sanitized.get("request", {}).get("tools", [])
+        for tg in (tools if isinstance(tools, list) else []):
+            for fd in (tg.get("functionDeclarations", []) if isinstance(tg, dict) else []):
+                params = fd.get("parameters", {})
+                props = params.get("properties", {}) if isinstance(params, dict) else {}
+                dump["tools_summary"].append({
+                    "name": fd.get("name"),
+                    "props_count": len(props),
+                    "required_count": len(params.get("required", []) if isinstance(params, dict) else []),
+                })
+        dump_path = Path(f"/tmp/bridge_error_{int(time.time())}.json")
+        dump_path.write_text(json.dumps(dump, indent=2, default=str))
+        print(f"[upstream] full request dump → {dump_path}", file=sys.stderr, flush=True)
+    except Exception:
+        pass
+
+
 def _add_description_hint(schema: dict[str, Any], hint: str) -> dict[str, Any]:
     """Append an informational hint to a schema's description field."""
     existing = schema.get("description", "")
@@ -592,15 +642,21 @@ def _flatten_type_array(schema: dict[str, Any]) -> dict[str, Any]:
     t = schema.get("type")
     if not isinstance(t, list):
         return schema
+    if not t:
+        schema = dict(schema)
+        schema["type"] = "STRING"
+        return schema
     non_null = [x for x in t if x != "null"]
-    if len(non_null) == 1:
+    if len(non_null) >= 1:
         schema = dict(schema)
         schema["type"] = non_null[0]
-        schema = _add_description_hint(schema, "nullable")
-    elif len(non_null) > 1:
+        if "null" in t:
+            schema = _add_description_hint(schema, "nullable")
+    else:
+        # All types are "null" — fallback to string
         schema = dict(schema)
-        schema["type"] = non_null[0]
-        schema = _add_description_hint(schema, f"types: {', '.join(non_null)}")
+        schema["type"] = "STRING"
+        schema = _add_description_hint(schema, "nullable (was: type null)")
     return schema
 
 
@@ -639,7 +695,9 @@ def _merge_allof(schema: dict[str, Any]) -> dict[str, Any]:
 
 
 def _flatten_anyof_oneof(schema: dict[str, Any]) -> dict[str, Any]:
-    """Detect const/enum-of-consts or nullable type unions in anyOf/oneOf."""
+    """Detect const/enum-of-consts or nullable type unions in anyOf/oneOf.
+    Complex unions that can't be flattened are stripped and replaced with a
+    looser STRING type + hint to avoid Gemini rejecting anyOf/oneOf outright."""
     for key in ("anyOf", "oneOf"):
         branches = schema.get(key)
         if not isinstance(branches, list) or not branches:
@@ -680,6 +738,12 @@ def _flatten_anyof_oneof(schema: dict[str, Any]) -> dict[str, Any]:
                 schema = _add_description_hint(schema, f"types: {', '.join(non_null)}")
             return schema
 
+        # Fallback: unflattenable union — strip it to avoid Gemini 400 error.
+        schema = dict(schema)
+        schema.pop(key)
+        schema["type"] = "STRING"
+        schema = _add_description_hint(schema, f"union of {len(branches)} schemas (simplified from {key})")
+
     return schema
 
 
@@ -696,8 +760,17 @@ def _clean_gemini_schema(obj: Any) -> Any:
     - Injects a placeholder for empty object schemas.
     """
     if isinstance(obj, dict):
-        # Unwrap a nested 'schema' key if it is the only schema content.
-        if "schema" in obj and isinstance(obj["schema"], dict):
+        # Unwrap a nested 'schema' key ONLY when it is a JSON-Schema wrapper:
+        #  - obj has no 'type' (so it's not itself a schema)
+        #  - obj['schema'] is a dict that DOES have 'type' or 'properties' (it's a real schema)
+        # This prevents corrupting schemas that legitimately have a property named 'schema'.
+        if (
+            "schema" in obj
+            and isinstance(obj["schema"], dict)
+            and "type" not in obj
+            and "properties" not in obj
+            and ("type" in obj["schema"] or "properties" in obj["schema"])
+        ):
             obj = obj["schema"]
 
         # Structural normalizations (do these before recursive cleaning so the
@@ -942,6 +1015,8 @@ def chat_completions():
                 with requests.post(url, json=gemini_req, headers=headers(),
                                    stream=True, timeout=60) as resp:
                     if resp.status_code != 200:
+                        print(f"[upstream] STREAM ERROR {resp.status_code}: {resp.text[:2000]}", file=sys.stderr, flush=True)
+                        _log_failed_request(gemini_req, resp.status_code, resp.text)
                         err = {"error": {"message": resp.text, "type": "upstream_error",
                                          "code": resp.status_code}}
                         yield f"data: {json.dumps(err)}\n\n"
@@ -1028,6 +1103,9 @@ def chat_completions():
     except Exception as e:
         return jsonify({"error": {"message": str(e), "type": "upstream_error"}}), 502
     if resp.status_code != 200:
+        print(f"[upstream] ERROR {resp.status_code}: {resp.text[:2000]}", file=sys.stderr, flush=True)
+        # Log the failing request (without full message content) for debugging
+        _log_failed_request(gemini_req, resp.status_code, resp.text)
         return jsonify({"error": {"message": resp.text, "type": "upstream_error",
                                   "code": resp.status_code}}), resp.status_code
 

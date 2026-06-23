@@ -175,21 +175,25 @@ read -rp "Restart Hermes gateway now? [Y/n]: " RESTART_ANSWER
 RESTART_ANSWER="${RESTART_ANSWER:-Y}"
 if [[ "$RESTART_ANSWER" =~ ^[Yy] ]]; then
     echo ""
-    echo "Hermes gateway status BEFORE restart:"
-    systemctl status hermes-gateway --no-pager || true
-
-    echo ""
     echo "Restarting Hermes gateway ..."
     if systemctl restart hermes-gateway 2>/dev/null; then
-        echo "Hermes gateway restarted."
+        echo "Hermes gateway restarted via systemctl."
+    elif [[ "$EUID" -eq 0 ]]; then
+        echo "Running as root — restarting gateway process directly ..."
+        if command -v hermes >/dev/null 2>&1; then
+            hermes gateway restart --run-as-user root 2>/dev/null || {
+                # Fallback: kill the gateway and restart it
+                echo "Direct restart failed, killing and restarting gateway ..."
+                pkill -f "hermes gateway" 2>/dev/null || true
+                sleep 2
+                nohup hermes gateway > /dev/null 2>&1 &
+                echo "Gateway restarted in background."
+            }
+        fi
     else
-        echo "systemctl restart failed, trying 'hermes gateway restart' ..."
+        echo "Trying 'hermes gateway restart' ..."
         hermes gateway restart || true
     fi
-
-    echo ""
-    echo "Hermes gateway status AFTER restart:"
-    systemctl status hermes-gateway --no-pager || true
 else
     echo "Skipped Hermes gateway restart. Remember to restart it manually:"
     echo "  systemctl restart hermes-gateway"

@@ -459,12 +459,22 @@ fi
 # Write .env
 # ---------------------------------------------------------------------------
 cat > .env <<EOF
+# Antigravity Bridge configuration
+HOST=0.0.0.0
 PORT=${PORT}
 EOF
 
 if [[ -n "$API_KEY" ]]; then
     echo "BRIDGE_API_KEY=${API_KEY}" >> .env
 fi
+
+cat >> .env <<EOF
+
+# Credential sources
+ANTIGRAVITY_CONST=${DEFAULT_ANTIGRAVITY_CONST}
+ANTIGRAVITY_ACCOUNTS=${DEFAULT_ANTIGRAVITY_ACCOUNTS}
+ANTIGRAVITY_AUTH=${DEFAULT_ANTIGRAVITY_AUTH}
+EOF
 chmod 600 .env
 success "Wrote configuration to .env"
 
