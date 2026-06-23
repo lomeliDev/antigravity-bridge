@@ -49,3 +49,6 @@ secrets/
 
 # Systemd runtime
 antigravity-bridge.service.rendered
+
+# Project documentation source (kept locally, not committed)
+docs/
