@@ -50,7 +50,7 @@ print_step() {
 
 print_prereq_help() {
     echo ""
-    echo -e "${BOLD}Prerequisite steps${RESET}"
+    echo -e "${BOLD}Manual prerequisite steps${RESET}"
     echo "────────────────────────────────────────────────────────────────"
     echo "The bridge reuses the Google OAuth session created by OpenCode."
     echo ""
@@ -204,9 +204,9 @@ run_interactive_login() {
     local tool="$1"
     local cmd="$2"
     echo ""
-    info "The installer will now run '${cmd}' so you can log in."
-    info "Please follow the on-screen prompts and return here when done."
-    read -rp "Press Enter to continue ..."
+    info "The installer will now run: ${cmd}"
+    info "Follow the browser / terminal prompts to authenticate, then come back here."
+    read -rp "Press Enter to start the login ..."
     $cmd || true
 }
 
@@ -232,7 +232,7 @@ check_opencode_prerequisites() {
     if agy_session_exists; then
         success "An agy session was detected."
     else
-        warn "No agy session was detected. You must log in first."
+        warn "No agy session was detected. The installer can run 'agy login' for you now."
         read -rp "Run 'agy login' now? [Y/n]: " RUN_AGY_LOGIN
         RUN_AGY_LOGIN="${RUN_AGY_LOGIN:-Y}"
         if [[ "$RUN_AGY_LOGIN" =~ ^[Yy]$ ]]; then
@@ -276,7 +276,7 @@ check_opencode_prerequisites() {
     if opencode_google_auth_exists; then
         success "OpenCode Google OAuth credential found."
     else
-        warn "No OpenCode Google OAuth credential found."
+        warn "No OpenCode Google OAuth credential found. The installer can run 'opencode auth login' for you now."
         read -rp "Run 'opencode auth login' now? [Y/n]: " RUN_OPENCODE_LOGIN
         RUN_OPENCODE_LOGIN="${RUN_OPENCODE_LOGIN:-Y}"
         if [[ "$RUN_OPENCODE_LOGIN" =~ ^[Yy]$ ]]; then
