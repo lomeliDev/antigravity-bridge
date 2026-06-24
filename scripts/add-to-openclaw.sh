@@ -28,6 +28,12 @@ ask_with_default() {
 if [[ $# -ge 1 ]]; then
     DEFAULT_MODEL="$1"
 else
+    echo ""
+    echo "Available models (from bridge /v1/models):"
+    echo "  Flash: gemini-2.5-flash, gemini-3-flash, gemini-3.1-flash-lite, ..."
+    echo "  Pro:   gemini-3.1-pro-low, claude-sonnet-4-6, ..."
+    echo "  Run: curl -s http://127.0.0.1:${PORT}/v1/models | jq '.data[].id'"
+    echo ""
     DEFAULT_MODEL=$(ask_with_default "Model id" "gemini-2.5-flash")
 fi
 

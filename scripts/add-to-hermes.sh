@@ -45,6 +45,15 @@ ask_with_default() {
 if [[ $# -ge 1 ]]; then
     DEFAULT_MODEL="$1"
 else
+    echo ""
+    echo "Available models (from bridge /v1/models):"
+    echo "  Flash:    gemini-2.5-flash, gemini-2.5-flash-lite, gemini-3-flash,"
+    echo "            gemini-3.1-flash-lite, gemini-3.5-flash-extra-low, gemini-3.5-flash-low"
+    echo "  Thinking: gemini-2.5-flash-thinking"
+    echo "  Pro:      gemini-3.1-pro-low, gemini-pro-agent"
+    echo "  Claude:   claude-sonnet-4-6, claude-opus-4-6-thinking"
+    echo "  GPT:      gpt-oss-120b-medium"
+    echo ""
     DEFAULT_MODEL=$(ask_with_default "Model id" "gemini-2.5-flash")
 fi
 

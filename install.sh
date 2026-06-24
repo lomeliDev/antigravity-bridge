@@ -646,11 +646,13 @@ install_systemd() {
     if [[ "$EUID" -eq 0 ]]; then
         cp "${DAEMON_DIR}/antigravity-bridge.service" "$unit"
         systemctl daemon-reload
-        systemctl enable --now antigravity-bridge
+        systemctl enable antigravity-bridge
+        systemctl restart antigravity-bridge
     elif command -v sudo >/dev/null 2>&1; then
         sudo cp "${DAEMON_DIR}/antigravity-bridge.service" "$unit"
         sudo systemctl daemon-reload
-        sudo systemctl enable --now antigravity-bridge
+        sudo systemctl enable antigravity-bridge
+        sudo systemctl restart antigravity-bridge
     else
         error "Root privileges are required to install the systemd service."
         return 1
