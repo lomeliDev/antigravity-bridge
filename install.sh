@@ -745,14 +745,22 @@ run_tests() {
 
     info "Testing /v1/chat/completions ..."
     local chat_status
-    chat_status=$(curl -s -o /dev/null -w "%{http_code}" "${curl_auth[@]}" \
-        -H "Content-Type: application/json" \
-        -d '{"model":"gemini-2.5-flash","max_tokens":10,"messages":[{"role":"user","content":"say OK"}]}' \
-        "$base_url/v1/chat/completions" 2>/dev/null || true)
+    local chat_attempt=0
+    while [[ "$chat_attempt" -lt 3 ]]; do
+        chat_status=$(curl -s -o /dev/null -w "%{http_code}" "${curl_auth[@]}" \
+            -H "Content-Type: application/json" \
+            -d '{"model":"gemini-2.5-flash","max_tokens":10,"messages":[{"role":"user","content":"say OK"}]}' \
+            "$base_url/v1/chat/completions" 2>/dev/null || true)
+        if [[ "$chat_status" == "200" ]]; then
+            break
+        fi
+        sleep 2
+        ((chat_attempt++)) || true
+    done
     if [[ "$chat_status" == "200" ]]; then
         success "/v1/chat/completions working."
     else
-        warn "/v1/chat/completions returned ${chat_status:-no response} (bridge may need restart)."
+        warn "/v1/chat/completions returned ${chat_status:-no response} (may need restart)."
     fi
 
     # If Hermes is installed, show config tip
@@ -770,7 +778,7 @@ run_tests() {
         local profile_dir="${HOME}/.hermes"
         if [[ -d "$profile_dir" ]]; then
             local config_count
-            config_count=$(find "$profile_dir" -name "config.yaml" -maxdepth 1 | wc -l)
+            config_count=$(find "$profile_dir" -maxdepth 1 -name "config.yaml" | wc -l)
             if [[ "$config_count" -gt 1 ]]; then
                 warn "Multiple Hermes profiles detected. Run add-to-hermes.sh for each profile."
             fi
