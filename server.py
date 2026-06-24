@@ -221,6 +221,12 @@ class Auth:
 auth = Auth()
 app = Flask(__name__)
 
+
+# Return JSON for 404s (Hermes and other clients expect JSON, not HTML).
+@app.errorhandler(404)
+def not_found(_e):
+    return jsonify({"error": {"message": "Not found", "type": "invalid_request_error"}}), 404
+
 # ============================================================
 # Dynamic model list cache
 # ============================================================
