@@ -67,6 +67,18 @@ echo "  Provider: ${PROVIDER_NAME}"
 echo "  Base URL: ${BASE_URL}"
 echo "  Model:    ${DEFAULT_MODEL}"
 
+# Check for multiple Hermes profiles
+PROFILE_DIR="${HOME}/.hermes"
+if [[ -d "$PROFILE_DIR" ]]; then
+    CONFIG_FILES=$(find "$PROFILE_DIR" -maxdepth 1 -name "config*.yaml" 2>/dev/null | wc -l)
+    if [[ "$CONFIG_FILES" -gt 1 ]]; then
+        echo "  ⚠ Multiple Hermes config files detected ($CONFIG_FILES)."
+        echo "    This script edits ~/.hermes/config.yaml."
+        echo "    Run again with HERMES_HOME to target other profiles."
+        echo ""
+    fi
+fi
+
 HERMES_CONFIG="${HERMES_HOME:-${HOME}/.hermes}/config.yaml"
 mkdir -p "$(dirname "$HERMES_CONFIG")"
 

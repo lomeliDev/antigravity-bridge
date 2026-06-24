@@ -1036,6 +1036,47 @@ def health():
     })
 
 
+# ── Hermes-compatible optional endpoints ──────────────────────
+# Hermes Dashboard calls these to show usage / billing / provider
+# info.  The bridge does not track usage, so we return empty data
+# that satisfies Hermes without errors in the UI.
+
+
+@app.route("/v1/usage")
+@app.route("/v1/dashboard/billing/usage")
+@app.route("/dashboard/billing/usage")
+def usage_stub():
+    now = int(time.time())
+    return jsonify({
+        "object": "list",
+        "data": [],
+        "has_more": False,
+        "total_usage": 0,
+        "current_usage_usd": 0,
+        "hard_limit_usd": 999,
+        "soft_limit_usd": 999,
+        "system_hard_limit_usd": 999,
+        "soft_limit": 99900,
+        "hard_limit": 99900,
+        "system_hard_limit": 99900,
+        "current_usage": 0,
+        "daily_costs": [],
+        "total_usage_cents": 0,
+    })
+
+
+@app.route("/v1/billing/subscription")
+@app.route("/dashboard/billing/subscription")
+def subscription_stub():
+    return jsonify({
+        "has_payment_method": True,
+        "soft_limit_usd": 999,
+        "hard_limit_usd": 999,
+        "system_hard_limit_usd": 999,
+        "plan": {"id": "antigravity-bridge", "title": "Antigravity Bridge"},
+    })
+
+
 @app.route("/v1/models")
 def list_models():
     return jsonify({"object": "list", "data": fetch_available_models()})
