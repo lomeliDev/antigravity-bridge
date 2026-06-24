@@ -247,7 +247,7 @@ You can also pass them as arguments to skip the prompts:
 ./scripts/add-to-hermes.sh gemini-2.5-flash my-antigravity
 ```
 
-It registers the bridge as a named provider under `providers` in `~/.hermes/config.yaml` (and also keeps `custom_providers` for older Hermes versions). It then asks if you want to set it as the active provider:
+It registers the bridge as a named provider under `providers` in `~/.hermes/config.yaml` and removes any stale `custom_providers` entries that could cause Hermes to fall back to OpenRouter. It then asks if you want to set it as the active provider:
 
 ```yaml
 providers:
