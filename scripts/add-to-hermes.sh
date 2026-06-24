@@ -263,6 +263,24 @@ if [[ "$RESTART_ANSWER" =~ ^[Yy] ]]; then
         echo "  TUI      ... ⚪ no active sessions"
     fi
 
+    # 5) Wait for gateway to finish initializing MCP servers
+    echo -n "  MCP      ... waiting for servers to connect"
+    local mcp_wait=0
+    local mcp_max_wait=35
+    while [[ "$mcp_wait" -lt "$mcp_max_wait" ]]; do
+        echo -n "."
+        sleep 3
+        ((mcp_wait+=3))
+        # Gateway is ready when its API port responds
+        if curl -s --max-time 2 http://127.0.0.1:8642/health 2>/dev/null | grep -q '"status"' && [[ "$mcp_wait" -gt 10 ]]; then
+            echo " ✔ ready"
+            break
+        fi
+    done
+    if [[ "$mcp_wait" -ge "$mcp_max_wait" ]]; then
+        echo " ⚠ still initializing (MCP can take ~60s — wait before opening TUI)"
+    fi
+
     echo ""
     if [[ "$RESTART_ERRORS" -gt 0 ]]; then
         echo "⚠ $RESTART_ERRORS component(s) could not be restarted (may not be installed)."
@@ -270,6 +288,7 @@ if [[ "$RESTART_ANSWER" =~ ^[Yy] ]]; then
     else
         echo "✔ All Hermes components restarted."
     fi
+    echo "  Tip: wait ~30s before opening Hermes TUI so MCP servers finish connecting."
 else
     echo "Skipped Hermes restart. Remember to restart manually:"
     echo "  hermes gateway restart"
