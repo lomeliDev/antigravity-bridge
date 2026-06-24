@@ -746,7 +746,7 @@ run_tests() {
     info "Testing /v1/chat/completions ..."
     local chat_status
     local chat_attempt=0
-    while [[ "$chat_attempt" -lt 3 ]]; do
+    while [[ "$chat_attempt" -lt 5 ]]; do
         chat_status=$(curl -s -o /dev/null -w "%{http_code}" "${curl_auth[@]}" \
             -H "Content-Type: application/json" \
             -d '{"model":"gemini-2.5-flash","max_tokens":10,"messages":[{"role":"user","content":"say OK"}]}' \
@@ -754,35 +754,13 @@ run_tests() {
         if [[ "$chat_status" == "200" ]]; then
             break
         fi
-        sleep 2
+        sleep 3
         ((chat_attempt++)) || true
     done
     if [[ "$chat_status" == "200" ]]; then
         success "/v1/chat/completions working."
     else
         warn "/v1/chat/completions returned ${chat_status:-no response} (may need restart)."
-    fi
-
-    # If Hermes is installed, show config tip
-    if command -v hermes >/dev/null 2>&1; then
-        echo ""
-        info "Hermes CLI detected. To activate the bridge:"
-        if [[ -n "$API_KEY" ]]; then
-            echo "     hermes config set model.provider antigravity-bridge"
-            echo "     hermes config set model.default gemini-2.5-flash"
-            echo "     hermes gateway restart"
-        fi
-        echo ""
-        info "Or run: ./scripts/add-to-hermes.sh"
-        # Check for multiple Hermes profiles
-        local profile_dir="${HOME}/.hermes"
-        if [[ -d "$profile_dir" ]]; then
-            local config_count
-            config_count=$(find "$profile_dir" -maxdepth 1 -name "config.yaml" | wc -l)
-            if [[ "$config_count" -gt 1 ]]; then
-                warn "Multiple Hermes profiles detected. Run add-to-hermes.sh for each profile."
-            fi
-        fi
     fi
 
     echo ""
@@ -832,6 +810,32 @@ fi
 
 info "Test the bridge:"
 echo "     curl -s http://127.0.0.1:${PORT}/health | jq"
+
+echo ""
+
+# ── Offer to configure agents ──────────────────────────────────
+if [[ -x "${REPO_DIR}/scripts/add-to-hermes.sh" ]]; then
+    if command -v hermes >/dev/null 2>&1; then
+        read -rp "Configure Hermes to use this bridge? [Y/n]: " SETUP_HERMES
+        SETUP_HERMES="${SETUP_HERMES:-Y}"
+        if [[ "$SETUP_HERMES" =~ ^[Yy]$ ]]; then
+            echo ""
+            "${REPO_DIR}/scripts/add-to-hermes.sh" "${DEFAULT_MODEL:-gemini-2.5-flash}" "${PROVIDER_NAME:-antigravity-bridge}"
+        fi
+    fi
+fi
+
+if [[ -x "${REPO_DIR}/scripts/add-to-openclaw.sh" ]]; then
+    if command -v openclaw >/dev/null 2>&1; then
+        echo ""
+        read -rp "Configure OpenClaw to use this bridge? [Y/n]: " SETUP_OPENCLAW
+        SETUP_OPENCLAW="${SETUP_OPENCLAW:-Y}"
+        if [[ "$SETUP_OPENCLAW" =~ ^[Yy]$ ]]; then
+            echo ""
+            "${REPO_DIR}/scripts/add-to-openclaw.sh" "${DEFAULT_MODEL:-gemini-2.5-flash}" "${PROVIDER_NAME:-antigravity-bridge}"
+        fi
+    fi
+fi
 
 echo ""
 echo -e "${CYAN}Happy bridging!${RESET}"
