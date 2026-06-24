@@ -264,21 +264,27 @@ if [[ "$RESTART_ANSWER" =~ ^[Yy] ]]; then
     fi
 
     # 5) Wait for gateway to finish initializing MCP servers
-    echo -n "  MCP      ... waiting for servers to connect"
-    local mcp_wait=0
-    local mcp_max_wait=35
-    while [[ "$mcp_wait" -lt "$mcp_max_wait" ]]; do
-        echo -n "."
-        sleep 3
-        ((mcp_wait+=3))
-        # Gateway is ready when its API port responds
-        if curl -s --max-time 2 http://127.0.0.1:8642/health 2>/dev/null | grep -q '"status"' && [[ "$mcp_wait" -gt 10 ]]; then
-            echo " ✔ ready"
-            break
+    echo ""
+    read -rp "  Wait for MCP servers to finish connecting? [Y/n]: " WAIT_MCP
+    WAIT_MCP="${WAIT_MCP:-Y}"
+    if [[ "$WAIT_MCP" =~ ^[Yy]$ ]]; then
+        echo -n "  MCP      ... waiting for servers to connect"
+        local mcp_wait=0
+        local mcp_max_wait=35
+        while [[ "$mcp_wait" -lt "$mcp_max_wait" ]]; do
+            echo -n "."
+            sleep 3
+            ((mcp_wait+=3))
+            if curl -s --max-time 2 http://127.0.0.1:8642/health 2>/dev/null | grep -q '"status"' && [[ "$mcp_wait" -gt 10 ]]; then
+                echo " ✔ ready"
+                break
+            fi
+        done
+        if [[ "$mcp_wait" -ge "$mcp_max_wait" ]]; then
+            echo " ⚠ still initializing (MCP can take ~60s — wait before opening TUI)"
         fi
-    done
-    if [[ "$mcp_wait" -ge "$mcp_max_wait" ]]; then
-        echo " ⚠ still initializing (MCP can take ~60s — wait before opening TUI)"
+    else
+        echo "  MCP      ... ⚡ skipped (servers will connect in background)"
     fi
 
     echo ""
