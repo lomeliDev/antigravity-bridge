@@ -87,10 +87,11 @@ The installer will:
 6. Validate the Antigravity credential files.
 7. Check Python 3.10+ and create a virtual environment.
 8. Install Python dependencies.
-9. Ask for a **port** (default `52847`).
-10. Ask whether to enable an **API key / password** (generates a random one by default).
-11. Detect your platform and install a **systemd** (Linux) or **launchd** (macOS) daemon automatically.
-12. Run health / models validation tests.
+9. Install **`uv` / `uvx`** (needed by many Hermes MCP servers) if missing.
+10. Ask for a **port** (default `52847`).
+11. Ask whether to enable an **API key / password** (generates a random one by default).
+12. Detect your platform and install a **systemd** (Linux) or **launchd** (macOS) daemon automatically.
+13. Run health / models / chat validation tests.
 
 > **Do not run `agy login` or `opencode auth login` before `./install.sh`.** The installer handles the OAuth flows. If you already did them, the installer will detect them and skip those steps.
 
@@ -253,7 +254,6 @@ providers:
   antigravity-bridge:
     base_url: http://127.0.0.1:52847/v1
     api_key: your-bridge-api-key          # only if you enabled auth
-    api_mode: chat_completions
     models:
       - id: gemini-2.5-flash
         name: gemini-2.5-flash
@@ -265,7 +265,7 @@ model:
   default: gemini-2.5-flash
 ```
 
-At the end the script asks if you want to restart the Hermes gateway and shows the status before and after.
+At the end the script asks if you want to restart all Hermes components (Gateway, Dashboard, WebUI) and warns about active TUI sessions.
 
 If you skipped the automatic restart, do it manually:
 
@@ -393,13 +393,14 @@ Then in chat:
 ## 🧩 Supported features
 
 - `GET /health`
-- `GET /v1/models` and `GET /v1/models/{id}` (dynamically fetched from Antigravity)
-- `POST /v1/chat/completions` (blocking and SSE streaming)
+- `GET /v1/models` and `GET /v1/models/{id}` — public, no auth required *(dynamically fetched from Antigravity)*
+- `POST /v1/chat/completions` (blocking and SSE streaming) — requires `BRIDGE_API_KEY`
 - Tools / functions (`tools`, `tool_choice`, multi-turn `role: "tool"`)
 - Vision (`image_url` with base64 data URI or public http(s) URL)
 - `response_format` (`json_object` and `json_schema`)
 - `seed`, `max_tokens`, `max_completion_tokens`, `n`, `stop`, `temperature`, `top_p`
 - `stream_options.include_usage`
+- Hermes Dashboard compatibility stubs: `/v1/usage`, `/v1/billing/subscription`
 - Optional `BRIDGE_API_KEY` client authentication
 
 > **Note:** `logprobs`, `frequency_penalty`, `presence_penalty`, and `logit_bias` are not supported by the Antigravity upstream and are silently ignored.
@@ -467,6 +468,8 @@ curl -N "$BASE/v1/chat/completions" \
 | `401 Unauthorized` | Set `Authorization: Bearer <BRIDGE_API_KEY>` in your client, or disable the API key in `.env`. |
 | Models list is empty | The bridge could not refresh the Antigravity token. Check `bridge.log` and verify the credential files are valid. |
 | Service fails to start | Run the bridge manually to see the error: `source .env && .venv/bin/python3 server.py` |
+| MCP servers show "connecting" in TUI | Close and reopen the Hermes TUI — it caches connection status. Check real status with `hermes mcp list`. |
+| MCP servers fail with `uv`/`uvx` not found | Run `./install.sh` again — it auto-installs `uv`/`uvx` and symlinks to `/usr/local/bin`. |
 
 ---
 
