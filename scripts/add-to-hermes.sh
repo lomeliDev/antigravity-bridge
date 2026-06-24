@@ -132,30 +132,24 @@ else:
 providers = data.setdefault("providers", {})
 provider = {
     "base_url": base_url,
-    "api_mode": "chat_completions",
     "models": [{"id": model, "name": model}],
 }
 if api_key:
     provider["api_key"] = api_key
 providers[provider_name] = provider
 
-# Keep custom_providers in sync for older Hermes versions.
-custom_providers = data.setdefault("custom_providers", [])
-custom_providers[:] = [p for p in custom_providers if p.get("name") != provider_name]
-custom_providers.append({
-    "name": provider_name,
-    "base_url": base_url,
-    "api_mode": "chat_completions",
-    "models": [{"id": model, "name": model}],
-    **({"api_key": api_key} if api_key else {}),
-})
+# Drop custom_providers — not needed for Hermes ≥ 0.17.
+# Keeping them can cause Hermes to treat the bridge as "custom"
+# and fall back to OpenRouter.
+data.pop("custom_providers", None)
 
 model_section = data.setdefault("model", {})
+old_provider = model_section.get("provider", "")
 if set_active:
     model_section["provider"] = provider_name
     model_section["default"] = model
 
-# Always remove stale global base_url/api_key from model section.
+# Always remove stale global base_url/api_key/api_mode from model section.
 # Hermes sometimes auto-fills OpenRouter's URL here when the provider
 # name is 'custom' or the model is not found in the listing.
 removed = []
@@ -169,19 +163,20 @@ if removed:
 with open(config_path, "w") as f:
     yaml.dump(data, f, default_flow_style=False, sort_keys=False, allow_unicode=True)
 
-# Verify the final config and warn about common misconfigurations.
+# Verify the config took effect by re-reading it immediately.
 final_provider = model_section.get("provider")
 final_base_url = model_section.get("base_url", "")
-if final_provider != provider_name:
+
+if final_provider != provider_name and set_active:
     print(f"WARNING: model.provider is '{final_provider}', not '{provider_name}'.")
+    print(f"         Hermes may have overwritten it. Run:")
+    print(f"           hermes config set model.provider {provider_name}")
+    print(f"           hermes config set model.default {model}")
+elif old_provider and old_provider != provider_name and set_active:
+    print(f"Provider changed: '{old_provider}' → '{provider_name}'")
 if "openrouter" in str(final_base_url).lower():
     print(f"WARNING: model.base_url still points to OpenRouter ({final_base_url}).")
     print("         Remove it manually or the bridge will not be used.")
-if "openrouter" in str(final_base_url).lower() or final_provider != provider_name:
-    print("")
-    print("TIP: If Hermes TUI shows 'Provider: Custom endpoint' with OpenRouter,")
-    print("     run this script again or manually set in config.yaml:")
-    print(f"       model.provider: {provider_name}")
 
 print(f"Updated {config_path}")
 PY
