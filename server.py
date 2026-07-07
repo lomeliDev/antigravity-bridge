@@ -43,6 +43,7 @@ from flask import Flask, Response, jsonify, request
 # Config
 # ============================================================
 # Config — standalone (no longer dependent on OpenCode)
+# Multi-account: API keys → Google OAuth accounts
 # ============================================================
 
 # OAuth client credentials — Google's public gemini-cli desktop OAuth client.
@@ -76,7 +77,138 @@ AUTH_PATH = Path(os.environ.get(
     str(Path(__file__).resolve().parent / "antigravity-auth.json"),
 ))
 
-BRIDGE_API_KEY = os.environ.get("BRIDGE_API_KEY")
+BRIDGE_API_KEY = os.environ.get("BRIDGE_API_KEY", "")
+
+# ============================================================
+# Multi-account support
+# ============================================================
+# accounts.json maps API keys to Google OAuth accounts:
+# {
+#   "accounts": {
+#     "sk-xxx": {"label": "Miguel", "refresh_token": "1//...",
+#                 "client_id": "...", "client_secret": "..."}
+#   }
+# }
+#
+# Backward compat: if accounts.json is missing, the env vars
+# (BRIDGE_REFRESH_TOKEN, ANTIGRAVITY_CLIENT_ID, etc.) create
+# a single default account accessible with BRIDGE_API_KEY (or
+# without any key when BRIDGE_API_KEY is also empty).
+
+ACCOUNTS_FILE = Path(os.environ.get(
+    "BRIDGE_ACCOUNTS_FILE",
+    str(Path(__file__).resolve().parent / "accounts.json"),
+))
+
+# Per-account auth cache: antigravity-auth-<keyhash>.json
+AUTH_CACHE_DIR = Path(os.environ.get(
+    "BRIDGE_AUTH_CACHE_DIR",
+    str(Path(__file__).resolve().parent),
+))
+
+
+class AccountManager:
+    """Holds multiple Auth instances, keyed by API key."""
+
+    def __init__(self) -> None:
+        self._accounts: dict[str, "Auth"] = {}
+        self._lock = threading.Lock()
+        self._load()
+
+    def _load(self) -> None:
+        """Load accounts from accounts.json, falling back to env vars."""
+        if ACCOUNTS_FILE.exists():
+            try:
+                data = json.loads(ACCOUNTS_FILE.read_text())
+                raw = data.get("accounts", {})
+                for api_key, cfg in raw.items():
+                    if not isinstance(cfg, dict):
+                        continue
+                    self._accounts[api_key] = Auth(
+                        api_key=api_key,
+                        label=cfg.get("label", ""),
+                        refresh_token=cfg.get("refresh_token", ""),
+                        client_id=cfg.get("client_id", ANTIGRAVITY_CLIENT_ID),
+                        client_secret=cfg.get("client_secret", ANTIGRAVITY_CLIENT_SECRET),
+                    )
+                print(f"[accounts] loaded {len(self._accounts)} from accounts.json", flush=True)
+            except Exception as e:
+                print(f"[accounts] WARN reading accounts.json: {e}", file=sys.stderr, flush=True)
+
+        # Backward compat: single account from env vars
+        if not self._accounts and (BRIDGE_REFRESH_TOKEN):
+            default_key = BRIDGE_API_KEY or "default"
+            self._accounts[default_key] = Auth(
+                api_key=default_key,
+                label="default (env)",
+                refresh_token=BRIDGE_REFRESH_TOKEN,
+                client_id=ANTIGRAVITY_CLIENT_ID,
+                client_secret=ANTIGRAVITY_CLIENT_SECRET,
+            )
+            print(f"[accounts] loaded default from env vars", flush=True)
+
+    def resolve(self, api_key: str | None) -> "Auth | None":
+        """Resolve an API key to an Auth instance.
+        If no key is provided and only one account exists, use it.
+        """
+        key = (api_key or "").strip()
+        if key:
+            return self._accounts.get(key)
+        # No key → use the only account if there's exactly one
+        if len(self._accounts) == 1:
+            return next(iter(self._accounts.values()))
+        return None
+
+    def list_accounts(self) -> list[dict]:
+        """Return summary of all accounts (no secrets)."""
+        result = []
+        for key, a in self._accounts.items():
+            result.append({
+                "api_key": key,
+                "label": a.label,
+                "email": a.email,
+                "authenticated": bool(a._refresh_token),
+            })
+        return result
+
+    def add_account(self, api_key: str, label: str = "",
+                    refresh_token: str = "", client_id: str = "",
+                    client_secret: str = "") -> "Auth":
+        with self._lock:
+            if api_key in self._accounts:
+                raise ValueError(f"Account with key '{api_key}' already exists")
+            a = Auth(
+                api_key=api_key,
+                label=label,
+                refresh_token=refresh_token,
+                client_id=client_id or ANTIGRAVITY_CLIENT_ID,
+                client_secret=client_secret or ANTIGRAVITY_CLIENT_SECRET,
+            )
+            self._accounts[api_key] = a
+            self._save()
+            return a
+
+    def remove_account(self, api_key: str) -> None:
+        with self._lock:
+            if api_key not in self._accounts:
+                raise KeyError(f"Account '{api_key}' not found")
+            del self._accounts[api_key]
+            self._save()
+
+    def _save(self) -> None:
+        data = {"accounts": {}}
+        for key, a in self._accounts.items():
+            data["accounts"][key] = {
+                "label": a.label,
+                "refresh_token": a._refresh_token,
+                "client_id": a._client_id,
+                "client_secret": a._client_secret,
+            }
+        try:
+            ACCOUNTS_FILE.write_text(json.dumps(data, indent=2))
+            ACCOUNTS_FILE.chmod(0o600)
+        except Exception as e:
+            print(f"[accounts] WARN saving: {e}", file=sys.stderr)
 
 
 # ============================================================
@@ -159,69 +291,92 @@ MODELS: list[dict[str, Any]] = [
 ]
 
 # ============================================================
-# Auth — loads credentials from constants.js / accounts.json / auth.json
+# Auth — per-account OAuth token management
 # ============================================================
 class Auth:
-    def __init__(self) -> None:
+    """Holds OAuth credentials for a single Google account."""
+
+    AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
+    SCOPES = (
+        "https://www.googleapis.com/auth/cloud-platform "
+        "https://www.googleapis.com/auth/userinfo.email "
+        "https://www.googleapis.com/auth/userinfo.profile "
+        "https://www.googleapis.com/auth/cclog "
+        "https://www.googleapis.com/auth/experimentsandconfigs"
+    )
+    REDIRECT_URI = "http://localhost:51121/oauth-callback"
+
+    def __init__(
+        self,
+        api_key: str = "",
+        label: str = "",
+        refresh_token: str = "",
+        client_id: str = "",
+        client_secret: str = "",
+    ) -> None:
+        self.api_key = api_key
+        self.label = label
         self._lock = threading.Lock()
         self._access: str | None = None
         self._expires_at: int = 0
-        self._client_id: str | None = None
-        self._client_secret: str | None = None
-        self._refresh_token: str | None = None
+        self._client_id: str | None = client_id or None
+        self._client_secret: str | None = client_secret or None
+        self._refresh_token: str | None = refresh_token or None
         self._project_id: str | None = None
         self._user_agent = "antigravity/2.0.6 darwin/arm64"
         self._api_client = "google-cloud-sdk vscode_cloudshelleditor/0.1"
         self._email: str | None = None
-        self._load_static()
+        # OAuth flow state
+        self._auth_state: str | None = None
+        self._auth_code: str | None = None
+        self._auth_verifier: str | None = None
+        self._auth_code_event: Any = None
+        # Inherit platform/ide from legacy accounts.json if available
+        self._load_legacy_metadata()
+        # Load cached token from per-account file
+        self._load_cache()
 
-    def _load_static(self) -> None:
-        # 1) OAuth client — hardcoded (public values, no longer reads from npm)
-        self._client_id = ANTIGRAVITY_CLIENT_ID
-        self._client_secret = ANTIGRAVITY_CLIENT_SECRET
+    def _cache_path(self) -> Path:
+        """Per-account auth cache file."""
+        import hashlib
+        h = hashlib.sha256(self.api_key.encode()).hexdigest()[:12] if self.api_key else "default"
+        return AUTH_CACHE_DIR / f"antigravity-auth-{h}.json"
 
-        # 2) Refresh token — from env var first, fallback to OpenCode accounts.json
-        used_env_token = False
-        if BRIDGE_REFRESH_TOKEN:
-            self._refresh_token = BRIDGE_REFRESH_TOKEN.strip("|")
-            used_env_token = True
-
-        # Still try to load email + fingerprint from accounts.json if available
-        if ACCOUNTS_PATH.exists():
+    def _load_cache(self) -> None:
+        path = self._cache_path()
+        if path.exists():
             try:
-                data = json.loads(ACCOUNTS_PATH.read_text())
-                accts = data.get("accounts") or []
-                if accts:
-                    acct = accts[0]
-                    self._email = acct.get("email")
-                    if not used_env_token:
-                        rt = acct.get("refreshToken") or acct.get("refresh_token") or ""
-                        self._refresh_token = rt.strip("|")
-                    fp = acct.get("fingerprint") or {}
-                    cm = fp.get("clientMetadata") or {}
-                    self._user_agent = fp.get("userAgent", self._user_agent)
-                    self._api_client = fp.get("apiClient", self._api_client)
-                    # MACOS is not a valid platform enum for loadCodeAssist
-                    plat = cm.get("platform", "") if isinstance(cm, dict) else ""
-                    if plat not in {"PLATFORM_UNSPECIFIED", "ANDROID", "IOS", "WEB", "LINUX"}:
-                        plat = "PLATFORM_UNSPECIFIED"
-                    self._platform = plat
-                    self._ide_type = cm.get("ideType", "ANTIGRAVITY") if isinstance(cm, dict) else "ANTIGRAVITY"
-            except Exception as e:
-                print(f"[auth] warn reading accounts: {e}", file=sys.stderr)
-
-        # 3) Cached token + projectId from own auth file
-        if AUTH_PATH.exists():
-            try:
-                auth_data = json.loads(AUTH_PATH.read_text())
-                if auth_data.get("access"):
-                    self._access = auth_data["access"]
-                if auth_data.get("expires"):
-                    self._expires_at = int(auth_data["expires"])
-                if auth_data.get("projectId"):
-                    self._project_id = auth_data["projectId"]
+                data = json.loads(path.read_text())
+                if data.get("access"):
+                    self._access = data["access"]
+                if data.get("expires"):
+                    self._expires_at = int(data["expires"])
+                if data.get("projectId"):
+                    self._project_id = data["projectId"]
             except Exception:
                 pass
+
+    def _load_legacy_metadata(self) -> None:
+        """Load email and fingerprint from legacy OpenCode accounts.json."""
+        if not ACCOUNTS_PATH.exists():
+            return
+        try:
+            data = json.loads(ACCOUNTS_PATH.read_text())
+            accts = data.get("accounts") or []
+            if accts:
+                acct = accts[0]
+                self._email = acct.get("email")
+                fp = acct.get("fingerprint") or {}
+                cm = fp.get("clientMetadata") or {}
+                self._user_agent = fp.get("userAgent", self._user_agent)
+                self._api_client = fp.get("apiClient", self._api_client)
+                plat = cm.get("platform", "") if isinstance(cm, dict) else ""
+                if plat not in {"PLATFORM_UNSPECIFIED", "ANDROID", "IOS", "WEB", "LINUX"}:
+                    plat = "PLATFORM_UNSPECIFIED"
+                self._platform = plat
+                self._ide_type = cm.get("ideType", "ANTIGRAVITY") if isinstance(cm, dict) else "ANTIGRAVITY"
+        except Exception:
+            pass
 
     def _platform_safe(self) -> str:
         return getattr(self, "_platform", "PLATFORM_UNSPECIFIED")
@@ -235,7 +390,7 @@ class Auth:
             if self._access and self._expires_at > now_ms + 30_000:
                 return self._access
             if not (self._client_id and self._client_secret and self._refresh_token):
-                raise RuntimeError("Missing OAuth credentials. Set BRIDGE_REFRESH_TOKEN in .env or export the env var.")
+                raise RuntimeError("Missing OAuth credentials. Set BRIDGE_REFRESH_TOKEN or run login.")
             try:
                 r = requests.post(
                     TOKEN_URL,
@@ -252,9 +407,8 @@ class Auth:
 
             if not r.ok:
                 err = _parse_google_oauth_error(r)
-                # Auto-clear credentials on invalid_grant (token revoked / expired)
                 if err.get("code") == "invalid_grant":
-                    print(f"[auth] invalid_grant — clearing revoked credentials", file=sys.stderr)
+                    print(f"[auth:{self.label}] invalid_grant — clearing credentials", file=sys.stderr)
                     self._clear_credentials()
                 raise RuntimeError(
                     f"Token refresh failed ({r.status_code}): {err.get('message', r.text[:200])}"
@@ -265,44 +419,26 @@ class Auth:
                 raise RuntimeError(f"Refresh response missing access_token: {list(tok.keys())}")
             self._access = tok["access_token"]
             self._expires_at = now_ms + int(tok.get("expires_in", 3600)) * 1000
-            # Google may rotate the refresh_token — save the new one if returned
             if "refresh_token" in tok and tok["refresh_token"] != self._refresh_token:
                 self._refresh_token = tok["refresh_token"]
-                _save_refresh_token_to_env()
-                print(f"[auth] refresh_token rotated", file=sys.stderr)
+                _save_account_token(self)
+                print(f"[auth:{self.label}] refresh_token rotated", file=sys.stderr)
             self._persist()
             return self._access
 
     def _clear_credentials(self) -> None:
-        """Clear stored credentials after a fatal auth error (e.g., invalid_grant).
-        Deletes the cached access token and comments out the refresh_token in .env."""
         self._access = None
         self._expires_at = 0
         self._refresh_token = None
         self._project_id = None
-        # Delete cached auth file
         try:
-            if AUTH_PATH.exists():
-                AUTH_PATH.unlink()
+            path = self._cache_path()
+            if path.exists():
+                path.unlink()
         except Exception:
             pass
-        # Comment out the token in .env so it doesn't retry on restart
-        try:
-            env_path = Path(__file__).resolve().parent / ".env"
-            if env_path.exists():
-                content = env_path.read_text()
-                new_lines = []
-                for line in content.splitlines():
-                    if line.startswith("BRIDGE_REFRESH_TOKEN=") and not line.startswith("#"):
-                        new_lines.append(f"# {line}  # revoked — run auth-login.py to re-authenticate")
-                    else:
-                        new_lines.append(line)
-                env_path.write_text("\n".join(new_lines) + "\n")
-        except Exception as e:
-            print(f"[auth] warn clearing .env: {e}", file=sys.stderr)
 
     def _credential_health(self) -> dict:
-        """Return credential health status (for /health endpoint)."""
         return {
             "has_refresh_token": bool(self._refresh_token),
             "has_access_token": bool(self._access),
@@ -313,13 +449,13 @@ class Auth:
 
     def _persist(self) -> None:
         try:
-            # Own simplified format — no longer nested under "google" key
-            AUTH_PATH.parent.mkdir(parents=True, exist_ok=True)
+            path = self._cache_path()
+            path.parent.mkdir(parents=True, exist_ok=True)
             data = {"access": self._access, "expires": self._expires_at}
             if self._project_id:
                 data["projectId"] = self._project_id
-            AUTH_PATH.write_text(json.dumps(data, indent=2))
-            AUTH_PATH.chmod(0o600)
+            path.write_text(json.dumps(data, indent=2))
+            path.chmod(0o600)
         except Exception as e:
             print(f"[auth] warn persisting token: {e}", file=sys.stderr)
 
@@ -351,7 +487,7 @@ class Auth:
             self._project_id = proj
         if not self._project_id:
             raise RuntimeError("loadCodeAssist did not return cloudaicompanionProject")
-        self._persist()  # save project_id to disk
+        self._persist()
         return self._project_id
 
     @property
@@ -361,37 +497,19 @@ class Auth:
     @property
     def email(self) -> str | None: return self._email
 
-
-    # ── OAuth login flow (PKCE + local callback, same as opencode-antigravity-auth) ──
-    AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
-    SCOPES = (
-        "https://www.googleapis.com/auth/cloud-platform "
-        "https://www.googleapis.com/auth/userinfo.email "
-        "https://www.googleapis.com/auth/userinfo.profile "
-        "https://www.googleapis.com/auth/cclog "
-        "https://www.googleapis.com/auth/experimentsandconfigs"
-    )
-    REDIRECT_URI = "http://localhost:51121/oauth-callback"
-    # Internal state for in-progress flow
-    _auth_state: str | None = None
-    _auth_code: str | None = None
-    _auth_verifier: str | None = None
-    _auth_code_event: Any = None  # threading.Event
+    # ── OAuth login flow (PKCE + local callback) ──
 
     @staticmethod
     def _generate_pkce() -> tuple[str, str, str]:
-        """Generate PKCE S256 verifier + challenge. Returns (verifier, challenge, state_payload)."""
         import hashlib
         verifier = base64.urlsafe_b64encode(os.urandom(32)).rstrip(b"=").decode()
         digest = hashlib.sha256(verifier.encode()).digest()
         challenge = base64.urlsafe_b64encode(digest).rstrip(b"=").decode()
-        # Encode verifier into state like OpenCode: base64url(JSON)
         payload = json.dumps({"verifier": verifier, "projectId": ""})
         state = base64.urlsafe_b64encode(payload.encode()).rstrip(b"=").decode()
         return verifier, challenge, state
 
     def build_auth_url(self) -> str:
-        """Build the Google OAuth authorization URL with PKCE."""
         from urllib.parse import urlencode
         verifier, challenge, state = self._generate_pkce()
         self._auth_verifier = verifier
@@ -410,7 +528,6 @@ class Auth:
         return f"{self.AUTH_URL}?{urlencode(params)}"
 
     def exchange_code(self, code: str, verifier: str = "") -> bool:
-        """Exchange authorization code + PKCE verifier for tokens. Returns True on success."""
         data = {
             "client_id": self._client_id,
             "client_secret": self._client_secret,
@@ -431,10 +548,9 @@ class Auth:
         now_ms = int(time.time() * 1000)
         self._expires_at = now_ms + int(tok.get("expires_in", 3600)) * 1000
 
-        # Extract email from id_token
         if "id_token" in tok:
             try:
-                payload = data["id_token"].split(".")[1]
+                payload = tok["id_token"].split(".")[1]
                 payload += "=" * ((4 - len(payload) % 4) % 4)
                 id_data = json.loads(base64.urlsafe_b64decode(payload))
                 self._email = id_data.get("email", self._email)
@@ -442,10 +558,34 @@ class Auth:
                 pass
 
         self._persist()
+        _save_account_token(self)
         return True
 
 
-auth = Auth()
+def _save_account_token(a: Auth) -> None:
+    """Persist the account's refresh_token back to accounts.json."""
+    try:
+        if not a._refresh_token:
+            return
+        if ACCOUNTS_FILE.exists():
+            data = json.loads(ACCOUNTS_FILE.read_text())
+        else:
+            data = {"accounts": {}}
+        data.setdefault("accounts", {})[a.api_key] = {
+            "label": a.label,
+            "refresh_token": a._refresh_token,
+            "client_id": a._client_id,
+            "client_secret": a._client_secret,
+        }
+        ACCOUNTS_FILE.write_text(json.dumps(data, indent=2))
+        ACCOUNTS_FILE.chmod(0o600)
+    except Exception as e:
+        print(f"[accounts] WARN saving token: {e}", file=sys.stderr)
+
+
+# ── Global instances ──
+accounts = AccountManager()
+_default_account: Auth | None = list(accounts._accounts.values())[0] if accounts._accounts else None
 app = Flask(__name__)
 
 
@@ -509,17 +649,18 @@ def _provider_to_owned_by(provider: str) -> str:
     return "google"
 
 
-def fetch_available_models() -> list[dict[str, Any]]:
+def fetch_available_models(account: Auth | None = None) -> list[dict[str, Any]]:
     """Fetch models from :fetchAvailableModels and return an OpenAI-compatible list."""
     global _MODEL_CACHE, _MODEL_CACHE_TS
+    a = account or _default_account
     now = time.time()
     if _MODEL_CACHE is not None and (now - _MODEL_CACHE_TS) < _MODEL_CACHE_TTL:
         return _MODEL_CACHE
     try:
         r = requests.post(
             f"{ASSIST_URL}:fetchAvailableModels",
-            headers=headers(),
-            json={"project": auth.get_project_id()},
+            headers=headers(a),
+            json={"project": a.get_project_id()},
             timeout=30,
         )
         r.raise_for_status()
@@ -746,7 +887,8 @@ def _model_max_output_tokens(model_id: str) -> int:
     return 8192  # safe default
 
 
-def build_gemini_request(model: str, body: dict[str, Any], contents: list, system_instr: str) -> dict[str, Any]:
+def build_gemini_request(model: str, body: dict[str, Any], contents: list,
+                         system_instr: str, account: Auth) -> dict[str, Any]:
     # Antigravity expects the model id without the "models/" prefix.
     model_id = model[7:] if model.startswith("models/") else model
 
@@ -770,7 +912,7 @@ def build_gemini_request(model: str, body: dict[str, Any], contents: list, syste
         generation_config["candidateCount"] = min(n, 8)
     _apply_response_format(body, generation_config)
     req: dict[str, Any] = {
-        "project": auth.get_project_id(),
+        "project": account.get_project_id(),
         "model": model_id,
         "request": {
             "contents": contents,
@@ -795,12 +937,15 @@ def build_gemini_request(model: str, body: dict[str, Any], contents: list, syste
     return req
 
 
-def headers() -> dict[str, str]:
+def headers(account: Auth | None = None) -> dict[str, str]:
+    a = account or _default_account
+    if not a:
+        raise RuntimeError("No account available")
     return {
-        "Authorization": f"Bearer {auth.get_token()}",
+        "Authorization": f"Bearer {a.get_token()}",
         "Content-Type": "application/json",
-        "User-Agent": auth.user_agent,
-        "X-Goog-Api-Client": auth.api_client,
+        "User-Agent": a.user_agent,
+        "X-Goog-Api-Client": a.api_client,
     }
 
 
@@ -1266,19 +1411,29 @@ def extract_tool_calls(payload: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 # ============================================================
-# API key authentication
+# API key → Account resolution
 # ============================================================
-def _check_api_key() -> tuple[dict[str, Any], int] | None:
-    """Validate the optional BRIDGE_API_KEY. Returns (error, status) if rejected."""
-    if not BRIDGE_API_KEY:
-        return None
+def _resolve_account() -> tuple["Auth", None] | tuple[None, tuple]:
+    """Resolve the account from the Authorization header. Returns (account, None) or (None, error)."""
     auth_header = request.headers.get("Authorization", "")
-    if not auth_header.startswith("Bearer "):
-        return {"error": {"message": "Missing Authorization header", "type": "authentication_error"}}, 401
-    provided = auth_header[7:]
-    if provided != BRIDGE_API_KEY:
-        return {"error": {"message": "Invalid API key", "type": "authentication_error"}}, 401
-    return None
+    api_key = auth_header.removeprefix("Bearer ").strip() if auth_header.startswith("Bearer ") else ""
+    account = accounts.resolve(api_key)
+    if not account:
+        return None, ({"error": {"message": "Invalid or missing API key. Provide Authorization: Bearer <key>",
+                                 "type": "authentication_error"}}, 401)
+    return account, None
+
+
+def _get_account() -> "Auth":
+    """Get the current request's account, or the default if only one exists."""
+    # Try resolving from header
+    account, _ = _resolve_account()
+    if account:
+        return account
+    # Fall back to default for backward compat
+    if _default_account:
+        return _default_account
+    raise RuntimeError("No account configured. Create accounts.json or set env vars.")
 
 
 # ============================================================
@@ -1286,24 +1441,28 @@ def _check_api_key() -> tuple[dict[str, Any], int] | None:
 # ============================================================
 @app.route("/")
 def index():
+    a = _get_account()
     return jsonify({
         "name": "antigravity-bridge",
         "version": "0.1.0",
+        "multi_account": True,
+        "accounts": len(accounts._accounts),
         "openai_compatible": True,
-        "email": auth.email,
-        "project_id": auth.get_project_id(),
-        "endpoints": ["/health", "/v1/models", "/v1/chat/completions"],
+        "email": a.email,
+        "project_id": a.get_project_id(),
+        "endpoints": ["/health", "/v1/models", "/v1/chat/completions", "/v1/usage", "/admin/accounts"],
     })
 
 
 @app.route("/health")
 def health():
-    cred = auth._credential_health()
+    a = _get_account()
+    cred = a._credential_health()
     return jsonify({
         "status": "ok",
-        "email": auth.email,
-        "project_id": auth.get_project_id(),
-        "token_expires_at": auth._expires_at,
+        "email": a.email,
+        "project_id": a.get_project_id(),
+        "token_expires_at": a._expires_at,
         "now_ms": int(time.time() * 1000),
         "credentials": cred,
     })
@@ -1331,8 +1490,75 @@ def subscription_stub():
         "soft_limit_usd": 999,
         "hard_limit_usd": 999,
         "system_hard_limit_usd": 999,
-        "plan": {"id": "antigravity-bridge", "title": "Antigravity Bridge"},
+        "plan": {"id": "antigravity-bridge", "title": "Antigravity Bridge (multi-account)"},
     })
+
+
+# ── Admin endpoints ──
+
+@app.route("/admin/accounts", methods=["GET"])
+def admin_list_accounts():
+    return jsonify(accounts.list_accounts())
+
+
+@app.route("/admin/accounts", methods=["POST"])
+def admin_add_account():
+    body = request.get_json(force=True, silent=True) or {}
+    api_key = body.get("api_key", "").strip()
+    if not api_key:
+        return jsonify({"error": "api_key is required"}), 400
+    if not api_key.startswith("sk-"):
+        return jsonify({"error": "api_key must start with 'sk-'"}), 400
+    try:
+        accounts.add_account(
+            api_key=api_key,
+            label=body.get("label", ""),
+            refresh_token=body.get("refresh_token", ""),
+            client_id=body.get("client_id", ""),
+            client_secret=body.get("client_secret", ""),
+        )
+        return jsonify({"ok": True, "api_key": api_key, "message": f"Account '{api_key}' added"}), 201
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 409
+
+
+@app.route("/admin/accounts/<api_key>", methods=["DELETE"])
+def admin_remove_account(api_key: str):
+    try:
+        accounts.remove_account(api_key)
+        return jsonify({"ok": True, "message": f"Account '{api_key}' removed"}), 200
+    except KeyError:
+        return jsonify({"error": f"Account '{api_key}' not found"}), 404
+
+
+@app.route("/admin/accounts/<api_key>/login", methods=["POST"])
+def admin_login_account(api_key: str):
+    """Start OAuth login for a specific account."""
+    global _login_account
+    a = accounts.resolve(api_key)
+    if not a:
+        return jsonify({"error": f"Account '{api_key}' not found"}), 404
+    try:
+        a._auth_code = None
+        a._auth_code_event = threading.Event()
+        _login_account = a
+
+        auth_url = a.build_auth_url()
+
+        def _bg():
+            _start_callback_server(51121, timeout=120, event=a._auth_code_event)
+
+        t = threading.Thread(target=_bg, daemon=True)
+        t.start()
+
+        return jsonify({
+            "auth_url": auth_url,
+            "message": f"Open this URL to authorize account '{a.label}':\n{auth_url}",
+            "state": a._auth_state,
+            "expires_in": 120,
+        }), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 @app.route("/v1/models")
@@ -1351,7 +1577,8 @@ def get_model(model_id: str):
 
 @app.route("/v1/chat/completions", methods=["POST"])
 def chat_completions():
-    if err := _check_api_key():
+    account, err = _resolve_account()
+    if err:
         return jsonify(err[0]), err[1]
 
     body = request.get_json(force=True, silent=True) or {}
@@ -1363,7 +1590,10 @@ def chat_completions():
         return jsonify({"error": {"message": "messages is required", "type": "invalid_request_error"}}), 400
 
     contents, system_instr = oai_messages_to_gemini(messages, model)
-    gemini_req = build_gemini_request(model, body, contents, system_instr)
+    try:
+        gemini_req = build_gemini_request(model, body, contents, system_instr, account)
+    except RuntimeError as e:
+        return jsonify({"error": {"message": str(e), "type": "authentication_error"}}), 401
 
     completion_id = f"chatcmpl-{uuid.uuid4().hex[:24]}"
     created = int(time.time())
@@ -1375,7 +1605,7 @@ def chat_completions():
         def gen():
             try:
                 url = f"{ASSIST_URL}:streamGenerateContent?alt=sse"
-                with requests.post(url, json=gemini_req, headers=headers(),
+                with requests.post(url, json=gemini_req, headers=headers(account),
                                    stream=True, timeout=60) as resp:
                     if resp.status_code != 200:
                         print(f"[upstream] STREAM ERROR {resp.status_code}: {resp.text[:2000]}", file=sys.stderr, flush=True)
@@ -1470,7 +1700,7 @@ def chat_completions():
     # Non-stream
     try:
         resp = requests.post(f"{ASSIST_URL}:generateContent",
-                             json=gemini_req, headers=headers(), timeout=60)
+                             json=gemini_req, headers=headers(account), timeout=60)
     except Exception as e:
         return jsonify({"error": {"message": str(e), "type": "upstream_error"}}), 502
     if resp.status_code != 200:
@@ -1538,17 +1768,20 @@ class OAuthCallbackHandler(BaseHTTPRequestHandler):
             if error:
                 msg = f"OAuth error: {error}"
                 self._respond(400, msg, msg)
-                auth._auth_code_event and auth._auth_code_event.set()
+                a = _login_account or _default_account
+                if a and a._auth_code_event:
+                    a._auth_code_event.set()
                 return
 
-            if state != auth._auth_state:
+            a = _login_account or _default_account
+            if not a or state != a._auth_state:
                 msg = "OAuth state mismatch — possible CSRF attack"
                 self._respond(400, msg, msg)
                 return
 
             if code:
-                auth._auth_code = code
-                auth._auth_code_event and auth._auth_code_event.set()
+                a._auth_code = code
+                a._auth_code_event and a._auth_code_event.set()
                 self._respond(200, "Authentication successful! You may close this window.",
                               "✅ Login successful! You can close this tab and return to the bridge.")
             else:
@@ -1586,20 +1819,25 @@ def _start_callback_server(port: int, timeout: float = 120.0, event: threading.E
         server.server_close()
 
 
+# ── OAuth login (now account-aware) ──
+# Current in-progress login account (only one at a time)
+_login_account: Auth | None = None
+
+
 @app.route("/auth/login", methods=["POST"])
 def auth_login_start():
-    """Start OAuth login flow.
-    Returns an auth_url to open in a browser. The bridge starts a background
-    thread with a local callback server on port 51121 to capture the code."""
+    """Start OAuth login for the default account."""
+    global _login_account
     try:
-        auth._auth_code = None
-        auth._auth_code_event = threading.Event()
+        a = _get_account()
+        a._auth_code = None
+        a._auth_code_event = threading.Event()
+        _login_account = a
 
-        auth_url = auth.build_auth_url()  # PKCE — generates verifier + state internally
+        auth_url = a.build_auth_url()
 
-        # Start callback server in background thread
         def _bg():
-            _start_callback_server(51121, timeout=120, event=auth._auth_code_event)
+            _start_callback_server(51121, timeout=120, event=a._auth_code_event)
 
         t = threading.Thread(target=_bg, daemon=True)
         t.start()
@@ -1607,7 +1845,7 @@ def auth_login_start():
         return jsonify({
             "auth_url": auth_url,
             "message": f"Open this URL in your browser and authorize:\n{auth_url}",
-            "state": auth._auth_state,
+            "state": a._auth_state,
             "expires_in": 120,
         }), 200
     except Exception as e:
@@ -1616,20 +1854,18 @@ def auth_login_start():
 
 @app.route("/auth/login/manual", methods=["POST"])
 def auth_login_manual():
-    """Exchange a manually-pasted authorization code for tokens.
-    Useful for remote servers where the local callback can't reach the bridge."""
+    a = _login_account or _get_account()
     try:
         body = request.get_json(force=True, silent=True) or {}
         code = body.get("code", "").strip()
         if not code:
             return jsonify({"error": "No authorization code provided.", "done": False}), 400
 
-        auth.exchange_code(code, auth._auth_verifier or "")
-        _save_refresh_token_to_env()
+        a.exchange_code(code, a._auth_verifier or "")
 
         return jsonify({
             "done": True,
-            "email": auth.email,
+            "email": a.email,
             "message": "Authentication successful!",
         }), 200
     except Exception as e:
@@ -1638,68 +1874,36 @@ def auth_login_manual():
 
 @app.route("/auth/login/callback", methods=["POST"])
 def auth_login_exchange():
-    """Exchange the captured code for tokens."""
+    a = _login_account or _get_account()
     try:
-        if not auth._auth_code_event:
+        if not a._auth_code_event:
             return jsonify({"error": "No login flow in progress. Call /auth/login first."}), 400
 
-        # Wait a bit for the callback if it hasn't arrived yet
-        if not auth._auth_code_event.wait(timeout=30):
+        if not a._auth_code_event.wait(timeout=30):
             return jsonify({"error": "Login timed out. Did you authorize in the browser?", "done": False}), 408
 
-        if not auth._auth_code:
+        if not a._auth_code:
             return jsonify({"error": "Authorization failed or was denied.", "done": False}), 400
 
-        auth.exchange_code(auth._auth_code, auth._auth_verifier or "")
-
-        # Persist the refresh token to .env for future standalone use
-        _save_refresh_token_to_env()
+        a.exchange_code(a._auth_code, a._auth_verifier or "")
 
         return jsonify({
             "done": True,
-            "email": auth.email,
+            "email": a.email,
             "message": "Authentication successful!",
         }), 200
     except Exception as e:
         return jsonify({"error": str(e), "done": False}), 500
 
 
-def _save_refresh_token_to_env():
-    """Save the refresh_token to .env file for future standalone runs."""
-    try:
-        env_path = Path(__file__).resolve().parent / ".env"
-        if not env_path.exists():
-            return
-        content = env_path.read_text()
-        token = auth._refresh_token
-        if not token:
-            return
-        token_line = f"BRIDGE_REFRESH_TOKEN={token}"
-        # Replace commented-out token or add new line
-        if "BRIDGE_REFRESH_TOKEN=" in content or "#BRIDGE_REFRESH_TOKEN=" in content:
-            new_content = []
-            for line in content.splitlines():
-                if "BRIDGE_REFRESH_TOKEN=" in line:
-                    new_content.append(token_line)
-                else:
-                    new_content.append(line)
-            env_path.write_text("\n".join(new_content) + "\n")
-        else:
-            env_path.write_text(content.rstrip() + "\n" + token_line + "\n")
-        env_path.chmod(0o600)
-        print("[auth] refresh_token saved to .env", file=sys.stderr)
-    except Exception as e:
-        print(f"[auth] warn saving token to .env: {e}", file=sys.stderr)
-
-
 @app.route("/auth/login/status", methods=["GET"])
 def auth_login_status():
-    """Check auth status."""
+    a = _login_account or _get_account()
     return jsonify({
-        "authenticated": bool(auth._refresh_token),
-        "email": auth.email,
-        "project_id": auth._project_id,
-        "in_progress": auth._auth_code_event is not None and not auth._auth_code_event.is_set(),
+        "authenticated": bool(a._refresh_token),
+        "email": a.email,
+        "project_id": a._project_id,
+        "in_progress": a._auth_code_event is not None and not a._auth_code_event.is_set(),
     })
 
 
@@ -1902,15 +2106,14 @@ def main() -> None:
     parser.add_argument("--port", type=int, default=int(os.environ.get("PORT", "52847")))
     args = parser.parse_args()
 
-    # Eager-init: refresh token and load projectId at startup.
-    try:
-        auth.get_token()
-        pid = auth.get_project_id()
-        print(f"[bridge] email      : {auth.email}", flush=True)
-        print(f"[bridge] project_id : {pid}", flush=True)
-        print(f"[bridge] token exp  : {auth._expires_at}", flush=True)
-    except Exception as e:
-        print(f"[bridge] WARN init: {e}", flush=True)
+    # Eager-init: refresh tokens and load project IDs at startup.
+    for key, a in accounts._accounts.items():
+        try:
+            a.get_token()
+            pid = a.get_project_id()
+            print(f"[bridge] account {a.label:20s} email={a.email} project={pid}", flush=True)
+        except Exception as e:
+            print(f"[bridge] WARN account {a.label}: {e}", flush=True)
 
     print(f"[bridge] listening  : http://{args.host}:{args.port}", flush=True)
     try:

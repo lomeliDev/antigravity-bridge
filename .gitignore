@@ -46,6 +46,8 @@ nohup.out
 .env
 *.env
 antigravity-auth.json
+antigravity-auth-*.json
+accounts.json
 secrets/
 
 # Systemd / daemon files (local only)
