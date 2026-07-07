@@ -6,9 +6,11 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![OpenAI compatible](https://img.shields.io/badge/OpenAI-compatible-412991?logo=openai&logoColor=white)](https://platform.openai.com/docs/api-reference)
 
-**Turn your [Antigravity](https://www.antigravity.ai/) / Gemini Code Assist Google OAuth session into an OpenAI-compatible API.**
+**Standalone Google OAuth bridge for Gemini Code Assist / Antigravity — no OpenCode required.**
 
-Built for agents and clients that do **not** support Google OAuth directly: **Hermes**, **OpenClaw**, **Open WebUI**, **Continue**, **Boba**, **BetterGPT**, and any other OpenAI-compatible tool.
+Built for agents and clients that do **not** support Google OAuth directly: **Hermes**, **Open WebUI**, **Continue**, **Boba**, **BetterGPT**, and any other OpenAI-compatible tool.
+
+*Based on the `opencode-antigravity-auth` plugin OAuth flow, but fully independent.*
 
 </div>
 
@@ -19,12 +21,11 @@ Built for agents and clients that do **not** support Google OAuth directly: **He
 - [TL;DR](#tldr)
 - [What is it?](#what-is-it)
 - [Quick install](#quick-install)
-- [Before you begin](#before-you-begin)
 - [Requirements](#requirements)
 - [Configuration](#configuration)
+- [Manual login](#manual-login)
 - [Agent setup](#agent-setup)
   - [Hermes](#hermes)
-  - [OpenClaw](#openclaw)
   - [Open WebUI](#open-webui)
   - [Generic OpenAI client](#generic-openai-client)
 - [Supported features](#supported-features)
@@ -38,7 +39,7 @@ Built for agents and clients that do **not** support Google OAuth directly: **He
 
 ## ⚡ TL;DR
 
-Run this **one command**. It installs everything, logs you in, and starts the bridge as a service:
+Run this **one command**. It installs everything, logs you in via Google OAuth, and starts the bridge as a service:
 
 ```bash
 git clone https://github.com/lomeliDev/antigravity-bridge.git && \
@@ -49,20 +50,20 @@ chmod +x install.sh scripts/*.sh && \
 
 When the installer asks, just press **Enter** to accept the defaults. It will open your browser for Google OAuth when needed.
 
-> **You do NOT need to run `agy login` or `opencode auth login` yourself.** The installer does it for you.
+> **No OpenCode, no `agy` CLI, no npm packages.** Just Python and a Google account.
 
 ---
 
 ## ✨ What is it?
 
-Your Antigravity / OpenCode IDE extension is already authenticated and keeps valid tokens in `~/.local/share/opencode/auth.json`. This small Flask bridge exposes those credentials through a clean **OpenAI-compatible HTTP API**, so you can reuse your account from any client that speaks the OpenAI protocol.
+A small Flask bridge that uses a standalone Google OAuth `refresh_token` to access the Gemini Code Assist API. It exposes a clean **OpenAI-compatible HTTP API** so you can use it from any OpenAI-compatible client.
 
 ```text
 ┌─────────────┐    OpenAI API      ┌────────────────────┐    HTTPS    ┌─────────────────────────┐
 │   Hermes    │ ─────────────────► │  Antigravity       │ ──────────► │  cloudcode-pa.google    │
-│  OpenClaw   │   /v1/chat/...     │  Bridge :PORT      │   Bearer   │  :loadCodeAssist        │
-│  Open WebUI │                    │                    │  + project │  :generateContent       │
-│  Continue   │                    │                    │            │  :streamGenerateContent │
+│  Open WebUI │   /v1/chat/...     │  Bridge :PORT      │   Bearer   │  :loadCodeAssist        │
+│  Continue   │                    │                    │  + project │  :generateContent       │
+│             │                    │                    │            │  :streamGenerateContent │
 └─────────────┘                    └────────────────────┘            └─────────────────────────┘
 ```
 
@@ -79,25 +80,17 @@ chmod +x install.sh scripts/*.sh
 
 The installer will:
 
-1. Install the OpenCode CLI if it is missing.
-2. Install the Antigravity CLI (`agy`) if it is missing.
-3. Run `agy login` for you if no session exists. *(A browser tab will open — just log in.)*
-4. Add the `opencode-antigravity-auth` plugin to OpenCode if it is missing.
-5. Run `opencode auth login` for you if no Google OAuth credential exists. *(Another browser tab — same account.)*
-6. Validate the Antigravity credential files.
-7. Check Python 3.10+ and create a virtual environment.
-8. Install Python dependencies.
-9. Install **`uv` / `uvx`** (needed by many Hermes MCP servers) if missing.
-10. Ask for a **port** (default `52847`).
-11. Ask whether to enable an **API key / password** (generates a random one by default).
-12. Detect your platform and install a **systemd** (Linux) or **launchd** (macOS) daemon automatically.
-13. Run health / models / chat validation tests.
-
-> **Do not run `agy login` or `opencode auth login` before `./install.sh`.** The installer handles the OAuth flows. If you already did them, the installer will detect them and skip those steps.
+1. Check Python 3.10+ and create a virtual environment.
+2. Install Python dependencies.
+3. Ask how you want to authenticate:
+   - **Option 1:** Paste an existing `refresh_token`.
+   - **Option 2:** Interactive browser OAuth login (no CLI tools needed).
+4. Ask for a **port** (default `52847`).
+5. Ask whether to enable an **API key** (generates a random one by default).
+6. Detect your platform and install a **systemd** (Linux) or **launchd** (macOS) daemon.
+7. Run health / models / chat validation tests.
 
 ### Manual run (fallback)
-
-If the installer cannot install a daemon, it creates a portable runner:
 
 ```bash
 ./daemon/run.sh
@@ -112,91 +105,16 @@ source .env
 
 ---
 
-## 🎯 Before you begin
-
-The bridge **reuses** the Google OAuth session created by OpenCode. You must complete these steps **once** before the bridge can authenticate with Antigravity.
-
-**You can skip this section if you run `./install.sh`.** The installer does everything below automatically. This section is only for people who want to set things up manually.
-
-### 1. Install the OpenCode CLI
-
-```bash
-curl -fsSL https://opencode.ai/install | bash
-opencode --version
-```
-
-### 2. Install the Antigravity CLI (`agy`)
-
-```bash
-curl -fsSL https://antigravity.google/cli/install.sh | bash
-agy --version
-```
-
-### 3. Log in with `agy`
-
-```bash
-agy login
-```
-
-> If your version of `agy` does not have a `login` subcommand, just run `agy` and complete the first-run OAuth wizard.
-
-### 4. Add the Antigravity auth plugin to OpenCode
-
-```bash
-mkdir -p ~/.config/opencode
-cat > ~/.config/opencode/opencode.json <<'EOF'
-{
-  "plugin": ["opencode-antigravity-auth@latest"]
-}
-EOF
-```
-
-### 5. Log in with OpenCode
-
-```bash
-opencode auth login
-```
-
-Select:
-
-- **Provider:** `Google`
-- **Method:** `OAuth with Google (Antigravity)**
-
-Sign in with the **same** Google account you used for `agy login`.
-
-### 6. Verify the credential was stored
-
-```bash
-opencode auth list
-```
-
-You should see a `Google oauth` entry.
-
-### 7. Where the credential files live
-
-After login you will have:
-
-```text
-~/.cache/opencode/packages/opencode-antigravity-auth@latest/node_modules/opencode-antigravity-auth/dist/src/constants.js
-~/.config/opencode/antigravity-accounts.json
-~/.local/share/opencode/auth.json
-```
-
----
-
 ## 📋 Requirements
 
 | Requirement | Details |
 |-------------|---------|
 | **Python** | 3.10 or newer |
 | **OS** | Linux (systemd recommended) or macOS |
-| **OpenCode CLI** | Installed (`curl -fsSL https://opencode.ai/install \| bash`) |
-| **Antigravity CLI** | Installed and logged in (`agy login`) |
-| **Antigravity auth plugin** | `opencode-antigravity-auth` configured in `~/.config/opencode/opencode.json` |
-| **OpenCode auth** | `opencode auth login` completed with Google → OAuth with Google (Antigravity) |
-| **Credential files** | The three files listed above must exist |
+| **Google account** | With access to Gemini Code Assist |
+| **OAuth refresh_token** | Obtained via the installer's interactive login or `auth-login.py` |
 
-If any prerequisite is missing, the installer stops and tells you exactly what to do.
+That's it. No OpenCode, no `agy`, no npm.
 
 ---
 
@@ -206,12 +124,12 @@ The bridge is configured through environment variables. The installer writes the
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `HOST` | `127.0.0.1` | Listen host |
+| `HOST` | `0.0.0.0` | Listen host |
 | `PORT` | `52847` | Listen port |
 | `BRIDGE_API_KEY` | *(none)* | Optional API key required from clients (`Authorization: Bearer <key>`) |
-| `ANTIGRAVITY_CONST` | `~/.cache/opencode/.../constants.js` | OAuth client id/secret |
-| `ANTIGRAVITY_ACCOUNTS` | `~/.config/opencode/antigravity-accounts.json` | Account + refresh token |
-| `ANTIGRAVITY_AUTH` | `~/.local/share/opencode/auth.json` | Cached access token + project id |
+| `BRIDGE_REFRESH_TOKEN` | *(none)* | Google OAuth refresh_token — set by installer or `auth-login.py` |
+| `ANTIGRAVITY_CLIENT_ID` | *(hardcoded)* | Google OAuth client ID — override only if needed |
+| `ANTIGRAVITY_CLIENT_SECRET` | *(hardcoded)* | Google OAuth client secret — override only if needed |
 
 Edit `.env` and restart the service to apply changes:
 
@@ -226,9 +144,24 @@ launchctl start com.lomelidev.antigravity-bridge
 
 ---
 
-## 🤖 Agent setup
+## 🔑 Manual login
 
-The bridge is meant to be consumed by agents and clients that do not support Google OAuth themselves.
+If you need to re-authenticate or set up a new token:
+
+```bash
+python3 auth-login.py
+```
+
+This will:
+1. Show you a Google OAuth URL to open in your browser.
+2. After authorizing, ask you to paste the redirect URL.
+3. Exchange the code for tokens and save them to `.env`.
+
+The bridge also exposes a web UI at `http://YOUR_HOST:PORT/login` with both auto (local callback) and manual login modes.
+
+---
+
+## 🤖 Agent setup
 
 ### Hermes
 
@@ -239,137 +172,42 @@ chmod +x scripts/add-to-hermes.sh
 ./scripts/add-to-hermes.sh
 ```
 
-The script will ask you for a **model id** and a **provider name**. Just press Enter to accept the defaults (`gemini-2.5-flash` and `antigravity-bridge`).
-
-You can also pass them as arguments to skip the prompts:
+Or pass model and provider name directly:
 
 ```bash
-./scripts/add-to-hermes.sh gemini-2.5-flash my-antigravity
+./scripts/add-to-hermes.sh gemini-2.5-flash antigravity-bridge
 ```
 
-It registers the bridge as a named provider under `providers` in `~/.hermes/config.yaml` and removes any stale `custom_providers` entries that could cause Hermes to fall back to OpenRouter. It then asks if you want to set it as the active provider:
+It registers the bridge as a provider in `~/.hermes/config.yaml`:
 
 ```yaml
 providers:
   antigravity-bridge:
     base_url: http://127.0.0.1:52847/v1
-    api_key: your-bridge-api-key          # only if you enabled auth
+    api_key: your-bridge-api-key
     models:
       - id: gemini-2.5-flash
         name: gemini-2.5-flash
-      # Tip: the bridge exposes 14 models via /v1/models.
-      # You only need one default here — Hermes discovers the rest.
 
 model:
   provider: antigravity-bridge
   default: gemini-2.5-flash
 ```
 
-At the end the script asks if you want to restart all Hermes components (Gateway, Dashboard, WebUI) and warns about active TUI sessions.
+### Switching models
 
-If you skipped the automatic restart, do it manually:
-
-```bash
-hermes gateway restart     # if you use the Hermes gateway
-# or close and reopen Hermes if you use the CLI/TUI
-```
-
-> **Important:** Hermes sometimes auto-fills `model.base_url` with `https://openrouter.ai/api/v1` when it cannot resolve the selected model. If this happens, the bridge is not being used. Make sure `model.provider` points to `antigravity-bridge` and that `model.base_url` is empty/removed.
-
-If you prefer not to activate the bridge immediately, answer `n` when the script asks. You can switch later with:
+The bridge lists available models via `/v1/models`. Switch in Hermes:
 
 ```bash
 /model antigravity-bridge:gemini-2.5-flash
-```
-
-#### Switching models
-
-The bridge lists 14 models automatically via `/v1/models`. You can switch to any of them in Hermes:
-
-```bash
-# Fast / cheap
-/model antigravity-bridge:gemini-2.5-flash-lite
-/model antigravity-bridge:gemini-3.1-flash-lite
-
-# Balanced
-/model antigravity-bridge:gemini-2.5-flash
-/model antigravity-bridge:gemini-3-flash
-
-# Thinking / reasoning
-/model antigravity-bridge:gemini-2.5-flash-thinking
-
-# Pro (larger context, better for complex tasks)
-/model antigravity-bridge:gemini-3.1-pro-low
-
-# Claude models
 /model antigravity-bridge:claude-sonnet-4-6
-/model antigravity-bridge:claude-opus-4-6-thinking
-
-# GPT model
-/model antigravity-bridge:gpt-oss-120b-medium
+/model antigravity-bridge:gemini-2.5-flash-thinking
 ```
 
-Or from the CLI:
+Or from CLI:
 
 ```bash
 hermes -z "explain quantum computing" -m claude-sonnet-4-6 --provider antigravity-bridge
-hermes -z "write a poem" -m gemini-2.5-flash-thinking --provider antigravity-bridge
-```
-
-### OpenClaw
-
-Run the helper script after `./install.sh`:
-
-```bash
-chmod +x scripts/add-to-openclaw.sh
-./scripts/add-to-openclaw.sh
-```
-
-The script will ask you for a **model id** and a **provider name**. Just press Enter to accept the defaults (`gemini-2.5-flash` and `antigravity-bridge`).
-
-You can also pass them as arguments to skip the prompts:
-
-```bash
-./scripts/add-to-openclaw.sh gemini-2.5-flash my-antigravity
-```
-
-It edits `~/.openclaw/openclaw.json` (creating it if necessary) and adds the bridge as a custom provider:
-
-```json
-{
-  "models": {
-    "mode": "merge",
-    "providers": {
-      "antigravity-bridge": {
-        "baseUrl": "http://127.0.0.1:52847/v1",
-        "api": "openai-completions",
-        "apiKey": "your-bridge-api-key",
-        "models": [{ "id": "gemini-2.5-flash", "name": "gemini-2.5-flash" }]
-      }
-    }
-  },
-  "agents": {
-    "defaults": {
-      "models": {
-        "antigravity-bridge/gemini-2.5-flash": { "alias": "gemini-2.5-flash" }
-      }
-    }
-  }
-}
-```
-
-At the end the script asks if you want to apply the config and restart the OpenClaw gateway, and shows the status before and after.
-
-If you skipped the automatic restart, apply the config manually:
-
-```bash
-openclaw gateway config.apply --file ~/.openclaw/openclaw.json
-```
-
-Then in chat:
-
-```bash
-/model gemini-2.5-flash
 ```
 
 ### Open WebUI
@@ -393,8 +231,8 @@ Then in chat:
 ## 🧩 Supported features
 
 - `GET /health`
-- `GET /v1/models` and `GET /v1/models/{id}` — public, no auth required *(dynamically fetched from Antigravity)*
-- `POST /v1/chat/completions` (blocking and SSE streaming) — requires `BRIDGE_API_KEY`
+- `GET /v1/models` and `GET /v1/models/{id}` — public, no auth required
+- `POST /v1/chat/completions` (blocking and SSE streaming) — requires `BRIDGE_API_KEY` if set
 - Tools / functions (`tools`, `tool_choice`, multi-turn `role: "tool"`)
 - Vision (`image_url` with base64 data URI or public http(s) URL)
 - `response_format` (`json_object` and `json_schema`)
@@ -402,8 +240,7 @@ Then in chat:
 - `stream_options.include_usage`
 - Hermes Dashboard compatibility stubs: `/v1/usage`, `/v1/billing/subscription`
 - Optional `BRIDGE_API_KEY` client authentication
-
-> **Note:** `logprobs`, `frequency_penalty`, `presence_penalty`, and `logit_bias` are not supported by the Antigravity upstream and are silently ignored.
+- Token refresh — access tokens are refreshed automatically; if Google ever rotates the `refresh_token`, the bridge saves it to `.env` automatically
 
 ---
 
@@ -413,7 +250,7 @@ Then in chat:
 BASE=http://127.0.0.1:52847
 KEY="your-bridge-api-key-or-empty"
 AUTH=""
-[ -n "$KEY" ] && AUTH="-H Authorization: Bearer $KEY"
+[ -n "$KEY" ] && AUTH="-H Authorization: Bearer ${KEY}"
 
 # Health check
 curl -s $AUTH "$BASE/health" | jq
@@ -447,13 +284,11 @@ curl -N "$BASE/v1/chat/completions" \
 
 | Mistake | Why it fails | What to do |
 |---------|--------------|------------|
-| Running `agy login` or `opencode auth login` manually before `./install.sh` | Nothing breaks, but it is unnecessary. The installer does it automatically and skips the steps if it detects a session. | Just run `./install.sh`. |
-| Closing the terminal during the browser OAuth flow | The installer waits for you to come back. If you close it, the login never finishes. | Re-run `./install.sh`. |
-| Running `./install.sh` with `sudo` | The bridge will be configured for `root` and the service will run as `root`, which is usually not what you want. | Run as your normal user. |
-| Picking a port that is already in use | The bridge cannot start. | Re-run `./install.sh` and choose a different port, or stop the other service. |
+| Not having a `refresh_token` | The bridge can't authenticate. | Run `auth-login.py` or `./install.sh` and choose the interactive login. |
+| Closing the terminal during the browser OAuth flow | The installer waits for you to come back. | Re-run `./install.sh` or `auth-login.py`. |
+| Picking a port that is already in use | The bridge cannot start. | Choose a different port or stop the other service. |
 | Forgetting the `BRIDGE_API_KEY` when connecting a client | You get `401 Unauthorized`. | Copy the key from `.env` or disable auth by removing `BRIDGE_API_KEY` from `.env`. |
-| Using a different Google account for `agy login` and `opencode auth login` | The credentials may not match and the bridge can fail to refresh tokens. | Use the **same** Google account for both logins. |
-| `hermes gateway restart` fails with "Refusing to install as root" | Hermes guards against running its service as root by default. | Use `hermes gateway restart --run-as-user root` or restart manually: `pkill -f 'hermes gateway' && hermes gateway &` |
+| Token expired after 6 months of inactivity | Google revokes unused refresh tokens. | Run `auth-login.py` to get a new one. |
 
 ---
 
@@ -461,29 +296,23 @@ curl -N "$BASE/v1/chat/completions" \
 
 | Problem | Solution |
 |---------|----------|
-| `opencode CLI not found` | Install OpenCode first: https://opencode.ai |
-| `opencode-antigravity-auth plugin is not configured` | Run the installer and let it add the plugin, or add it manually as shown in [Before you begin](#before-you-begin). |
-| `No Antigravity credentials found` | Run `opencode auth login`, select Google → OAuth with Google (Antigravity), and finish the browser login. |
-| Port already in use | Pick a different port during install or stop the other service. |
-| `401 Unauthorized` | Set `Authorization: Bearer <BRIDGE_API_KEY>` in your client, or disable the API key in `.env`. |
-| Models list is empty | The bridge could not refresh the Antigravity token. Check `bridge.log` and verify the credential files are valid. |
-| Service fails to start | Run the bridge manually to see the error: `source .env && .venv/bin/python3 server.py` |
-| MCP servers show "connecting" in TUI | Close and reopen the Hermes TUI — it caches connection status. Check real status with `hermes mcp list`. |
-| MCP servers fail with `uv`/`uvx` not found | Run `./install.sh` again — it auto-installs `uv`/`uvx` and symlinks to `/usr/local/bin`. |
+| Bridge fails to start | Run manually to see the error: `source .env && .venv/bin/python3 server.py` |
+| `Missing OAuth credentials` at startup | Set `BRIDGE_REFRESH_TOKEN` in `.env` or run `auth-login.py`. |
+| `401 Unauthorized` from upstream | The refresh token may be revoked. Run `auth-login.py` to get a new one. |
+| Models list is empty | The bridge couldn't refresh the token. Check `.env` and run `auth-login.py`. |
+| MCP servers fail with `uv`/`uvx` not found | Run `./install.sh` again — it auto-installs `uv`/`uvx`. |
 
 ---
 
 ## ⚠️ Disclaimer
 
-This is an **unofficial, experimental** project. The author is not affiliated with Google, Antigravity, Gemini Code Assist, OpenCode, or any other mentioned service.
+This is an **unofficial, experimental** project. The author is not affiliated with Google, Antigravity, Gemini Code Assist, or any other mentioned service.
 
 By installing and using this software you agree that:
 
 - You use it **at your own risk**.
 - The author is **not responsible** for account bans, suspensions, rate-limit issues, data loss, security incidents, or any other consequences.
 - You are solely responsible for complying with the terms of service of any third-party service you access through this bridge.
-
-The author created this project "just for fun". Be conscious of what you do with it.
 
 See [DISCLAIMER.md](DISCLAIMER.md) for the full text.
 

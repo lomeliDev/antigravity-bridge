@@ -45,7 +45,11 @@ nohup.out
 # Local credentials / secrets
 .env
 *.env
+antigravity-auth.json
 secrets/
+
+# Systemd / daemon files (local only)
+daemon/
 
 # Systemd runtime
 antigravity-bridge.service.rendered
