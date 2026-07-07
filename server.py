@@ -78,6 +78,70 @@ AUTH_PATH = Path(os.environ.get(
 
 BRIDGE_API_KEY = os.environ.get("BRIDGE_API_KEY")
 
+
+# ============================================================
+# Usage tracker (in-memory, reset on restart)
+# ============================================================
+class UsageTracker:
+    """Thread-safe per-model usage tracker."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._total_requests: int = 0
+        self._total_errors: int = 0
+        self._prompt_tokens: int = 0
+        self._completion_tokens: int = 0
+        self._by_model: dict[str, dict[str, int]] = {}  # model -> {requests, errors, prompt, completion}
+        self._started_at: float = time.time()
+
+    def record(
+        self,
+        model: str,
+        prompt_tokens: int = 0,
+        completion_tokens: int = 0,
+        error: bool = False,
+    ) -> None:
+        with self._lock:
+            self._total_requests += 1
+            self._prompt_tokens += prompt_tokens
+            self._completion_tokens += completion_tokens
+            if error:
+                self._total_errors += 1
+
+            if model not in self._by_model:
+                self._by_model[model] = {
+                    "requests": 0, "errors": 0,
+                    "prompt_tokens": 0, "completion_tokens": 0,
+                }
+            m = self._by_model[model]
+            m["requests"] += 1
+            m["prompt_tokens"] += prompt_tokens
+            m["completion_tokens"] += completion_tokens
+            if error:
+                m["errors"] += 1
+
+    def snapshot(self) -> dict[str, Any]:
+        with self._lock:
+            models_sorted = sorted(
+                self._by_model.items(),
+                key=lambda kv: kv[1]["requests"],
+                reverse=True,
+            )
+            return {
+                "uptime_seconds": int(time.time() - self._started_at),
+                "total_requests": self._total_requests,
+                "total_errors": self._total_errors,
+                "total_prompt_tokens": self._prompt_tokens,
+                "total_completion_tokens": self._completion_tokens,
+                "total_tokens": self._prompt_tokens + self._completion_tokens,
+                "by_model": {
+                    model: dict(stats) for model, stats in models_sorted
+                },
+            }
+
+
+_usage = UsageTracker()
+
 ASSIST_URL = "https://cloudcode-pa.googleapis.com/v1internal"
 TOKEN_URL = "https://oauth2.googleapis.com/token"
 
@@ -1255,23 +1319,8 @@ def health():
 @app.route("/v1/dashboard/billing/usage")
 @app.route("/dashboard/billing/usage")
 def usage_stub():
-    now = int(time.time())
-    return jsonify({
-        "object": "list",
-        "data": [],
-        "has_more": False,
-        "total_usage": 0,
-        "current_usage_usd": 0,
-        "hard_limit_usd": 999,
-        "soft_limit_usd": 999,
-        "system_hard_limit_usd": 999,
-        "soft_limit": 99900,
-        "hard_limit": 99900,
-        "system_hard_limit": 99900,
-        "current_usage": 0,
-        "daily_costs": [],
-        "total_usage_cents": 0,
-    })
+    snap = _usage.snapshot()
+    return jsonify(snap)
 
 
 @app.route("/v1/billing/subscription")
@@ -1330,6 +1379,7 @@ def chat_completions():
                                    stream=True, timeout=60) as resp:
                     if resp.status_code != 200:
                         print(f"[upstream] STREAM ERROR {resp.status_code}: {resp.text[:2000]}", file=sys.stderr, flush=True)
+                        _usage.record(model=model, error=True)
                         _log_failed_request(gemini_req, resp.status_code, resp.text)
                         err = {"error": {"message": resp.text, "type": "upstream_error",
                                          "code": resp.status_code}}
@@ -1397,9 +1447,16 @@ def chat_completions():
                             "completion_tokens": stream_usage.get("candidatesTokenCount", 0),
                             "total_tokens": stream_usage.get("totalTokenCount", 0),
                         }
+                    # Record usage from stream metadata
+                    _usage.record(
+                        model=model,
+                        prompt_tokens=stream_usage.get("promptTokenCount", 0),
+                        completion_tokens=stream_usage.get("candidatesTokenCount", 0),
+                    )
                     yield f"data: {json.dumps(final)}\n\n"
                     yield "data: [DONE]\n\n"
             except Exception as e:
+                _usage.record(model=model, error=True)
                 err = {"error": {"message": str(e), "type": "server_error"}}
                 yield f"data: {json.dumps(err)}\n\n"
                 yield "data: [DONE]\n\n"
@@ -1418,6 +1475,7 @@ def chat_completions():
         return jsonify({"error": {"message": str(e), "type": "upstream_error"}}), 502
     if resp.status_code != 200:
         print(f"[upstream] ERROR {resp.status_code}: {resp.text[:2000]}", file=sys.stderr, flush=True)
+        _usage.record(model=model, error=True)
         # Log the failing request (without full message content) for debugging
         _log_failed_request(gemini_req, resp.status_code, resp.text)
         return jsonify({"error": {"message": resp.text, "type": "upstream_error",
@@ -1426,6 +1484,11 @@ def chat_completions():
     data = resp.json()
     candidates = _extract_candidates(data)
     usage = (data.get("response") or data).get("usageMetadata", {}) or {}
+    _usage.record(
+        model=model,
+        prompt_tokens=usage.get("promptTokenCount", 0),
+        completion_tokens=usage.get("candidatesTokenCount", 0),
+    )
     choices: list[dict[str, Any]] = []
     for idx, candidate in enumerate(candidates):
         text = _candidate_text(candidate)
