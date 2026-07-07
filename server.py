@@ -172,20 +172,33 @@ class Auth:
                 return self._access
             if not (self._client_id and self._client_secret and self._refresh_token):
                 raise RuntimeError("Missing OAuth credentials. Set BRIDGE_REFRESH_TOKEN in .env or export the env var.")
-            r = requests.post(
-                TOKEN_URL,
-                data={
-                    "client_id": self._client_id,
-                    "client_secret": self._client_secret,
-                    "refresh_token": self._refresh_token,
-                    "grant_type": "refresh_token",
-                },
-                timeout=20,
-            )
-            r.raise_for_status()
+            try:
+                r = requests.post(
+                    TOKEN_URL,
+                    data={
+                        "client_id": self._client_id,
+                        "client_secret": self._client_secret,
+                        "refresh_token": self._refresh_token,
+                        "grant_type": "refresh_token",
+                    },
+                    timeout=20,
+                )
+            except requests.RequestException as e:
+                raise RuntimeError(f"Token refresh network error: {e}")
+
+            if not r.ok:
+                err = _parse_google_oauth_error(r)
+                # Auto-clear credentials on invalid_grant (token revoked / expired)
+                if err.get("code") == "invalid_grant":
+                    print(f"[auth] invalid_grant — clearing revoked credentials", file=sys.stderr)
+                    self._clear_credentials()
+                raise RuntimeError(
+                    f"Token refresh failed ({r.status_code}): {err.get('message', r.text[:200])}"
+                )
+
             tok = r.json()
             if "access_token" not in tok:
-                raise RuntimeError(f"Refresh response missing access_token: {tok}")
+                raise RuntimeError(f"Refresh response missing access_token: {list(tok.keys())}")
             self._access = tok["access_token"]
             self._expires_at = now_ms + int(tok.get("expires_in", 3600)) * 1000
             # Google may rotate the refresh_token — save the new one if returned
@@ -195,6 +208,44 @@ class Auth:
                 print(f"[auth] refresh_token rotated", file=sys.stderr)
             self._persist()
             return self._access
+
+    def _clear_credentials(self) -> None:
+        """Clear stored credentials after a fatal auth error (e.g., invalid_grant).
+        Deletes the cached access token and comments out the refresh_token in .env."""
+        self._access = None
+        self._expires_at = 0
+        self._refresh_token = None
+        self._project_id = None
+        # Delete cached auth file
+        try:
+            if AUTH_PATH.exists():
+                AUTH_PATH.unlink()
+        except Exception:
+            pass
+        # Comment out the token in .env so it doesn't retry on restart
+        try:
+            env_path = Path(__file__).resolve().parent / ".env"
+            if env_path.exists():
+                content = env_path.read_text()
+                new_lines = []
+                for line in content.splitlines():
+                    if line.startswith("BRIDGE_REFRESH_TOKEN=") and not line.startswith("#"):
+                        new_lines.append(f"# {line}  # revoked — run auth-login.py to re-authenticate")
+                    else:
+                        new_lines.append(line)
+                env_path.write_text("\n".join(new_lines) + "\n")
+        except Exception as e:
+            print(f"[auth] warn clearing .env: {e}", file=sys.stderr)
+
+    def _credential_health(self) -> dict:
+        """Return credential health status (for /health endpoint)."""
+        return {
+            "has_refresh_token": bool(self._refresh_token),
+            "has_access_token": bool(self._access),
+            "access_expired": self._expires_at <= int(time.time() * 1000) if self._access else True,
+            "email": self._email,
+            "project_id": self._project_id,
+        }
 
     def _persist(self) -> None:
         try:
@@ -332,6 +383,44 @@ class Auth:
 
 auth = Auth()
 app = Flask(__name__)
+
+
+# ── Google OAuth error classification (matching opencode-antigravity-auth's parseOAuthErrorPayload) ──
+def _parse_google_oauth_error(response: requests.Response) -> dict:
+    """Parse Google OAuth error responses into a structured dict.
+    Returns {'code': str|None, 'message': str, 'status': int}."""
+    result: dict = {"code": None, "message": "", "status": response.status_code}
+    try:
+        text = response.text
+    except Exception:
+        text = ""
+    if not text:
+        result["message"] = f"HTTP {response.status_code}"
+        return result
+    try:
+        payload = json.loads(text)
+    except Exception:
+        result["message"] = text[:200]
+        return result
+    if not isinstance(payload, dict):
+        result["message"] = str(payload)[:200]
+        return result
+    # Google OAuth errors: {"error": "...", "error_description": "..."}
+    code = payload.get("error")
+    desc = payload.get("error_description", "")
+    if isinstance(code, str):
+        result["code"] = code
+    elif isinstance(code, dict):
+        result["code"] = code.get("status") or code.get("code")
+        if not desc and code.get("message"):
+            desc = code["message"]
+    if desc:
+        result["message"] = desc
+    elif isinstance(code, str):
+        result["message"] = code
+    if not result["message"]:
+        result["message"] = text[:200]
+    return result
 
 
 # Return JSON for 404s (Hermes and other clients expect JSON, not HTML).
@@ -1145,12 +1234,14 @@ def index():
 
 @app.route("/health")
 def health():
+    cred = auth._credential_health()
     return jsonify({
         "status": "ok",
         "email": auth.email,
         "project_id": auth.get_project_id(),
         "token_expires_at": auth._expires_at,
         "now_ms": int(time.time() * 1000),
+        "credentials": cred,
     })
 
 
