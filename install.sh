@@ -132,24 +132,61 @@ if ! [[ "$PORT" =~ ^[0-9]+$ ]] || [[ "$PORT" -lt 1 ]] || [[ "$PORT" -gt 65535 ]]
 fi
 
 echo ""
-echo "You can protect the bridge with an API key."
-echo "Clients must send: Authorization: Bearer <key>"
-read -rp "Require an API key? [Y/n]: " NEED_KEY
-NEED_KEY="${NEED_KEY:-Y}"
+echo "You can protect the bridge with API keys."
+echo ""
+echo "  [1] Single account — one BRIDGE_API_KEY for all clients (simple)"
+echo "  [2] Multi-account — each Google account gets its own API key (advanced)"
+echo ""
+read -rp "Mode [1/2]: " ACCT_MODE
+ACCT_MODE="${ACCT_MODE:-1}"
 
 API_KEY=""
-if [[ "$NEED_KEY" =~ ^[Yy]$ ]]; then
-    RANDOM_KEY="$(openssl rand -hex 24 2>/dev/null || python3 -c 'import secrets; print(secrets.token_hex(24))')"
-    read -rp "API key [random]: " API_KEY
-    API_KEY="${API_KEY:-$RANDOM_KEY}"
-    if [[ -z "$API_KEY" ]]; then
-        error "API key cannot be empty."
-        exit 1
+ADMIN_KEY=""
+if [[ "$ACCT_MODE" == "2" ]]; then
+    echo ""
+    echo -e "${BOLD}Multi-account mode${RESET}"
+    echo "────────────────────────────────────────────────────────────────"
+    echo "Accounts are managed in accounts.json (see accounts.json.example)."
+    echo "Add accounts later via: POST /admin/accounts"
+    echo ""
+    echo "Set an ADMIN key to protect the /admin/* endpoints."
+    read -rp "Admin key (leave empty for open access): " ADMIN_KEY
+    if [[ -n "$ADMIN_KEY" ]]; then
+        success "Admin key set."
+    else
+        warn "No admin key — /admin/* endpoints are open."
     fi
-    success "API key set."
+    # Create empty accounts.json from the current token
+    python3 -c "
+import json
+data = {'accounts': {}}
+with open('accounts.json', 'w') as f:
+    json.dump(data, f, indent=2)
+" 2>/dev/null || true
+    chmod 600 accounts.json 2>/dev/null || true
+    success "accounts.json created (add accounts via admin API)."
 else
-    info "No client authentication."
+    echo ""
+    echo "Clients must send: Authorization: Bearer <your-key>"
+    read -rp "Require an API key? [Y/n]: " NEED_KEY
+    NEED_KEY="${NEED_KEY:-Y}"
+
+    if [[ "$NEED_KEY" =~ ^[Yy]$ ]]; then
+        RANDOM_KEY="$(openssl rand -hex 24 2>/dev/null || python3 -c 'import secrets; print(secrets.token_hex(24))')"
+        read -rp "API key [random]: " API_KEY
+        API_KEY="${API_KEY:-$RANDOM_KEY}"
+        if [[ -z "$API_KEY" ]]; then
+            error "API key cannot be empty."
+            exit 1
+        fi
+        success "API key set."
+    else
+        info "No client authentication."
+    fi
 fi
+
+mkdir -p auth_cache
+chmod 700 auth_cache
 
 # ── Write .env ─────────────────────────────────────────────────
 cat > .env <<EOF

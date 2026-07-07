@@ -2127,6 +2127,10 @@ def main() -> None:
     parser.add_argument("--port", type=int, default=int(os.environ.get("PORT", "52847")))
     args = parser.parse_args()
 
+    # Ensure the auth cache directory exists
+    AUTH_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    AUTH_CACHE_DIR.chmod(0o700)
+
     # Eager-init: refresh tokens and load project IDs at startup.
     for key, a in accounts._accounts.items():
         try:

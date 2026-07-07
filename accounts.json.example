@@ -1,0 +1,19 @@
+{
+  "_comment": "Antigravity Bridge — multi-account configuration example",
+  "_usage": "Copy to accounts.json and fill in your credentials. Each key in 'accounts' is an API key that clients use to identify which Google account to use.",
+  "_format": "Authorization: Bearer <api_key> → uses that account's OAuth credentials",
+  "accounts": {
+    "sk-your-api-key-here": {
+      "label": "My Personal Account",
+      "refresh_token": "1//your-refresh-token-here",
+      "client_id": "your-client-id.apps.googleusercontent.com",
+      "client_secret": "GOCSPX-your-client-secret"
+    },
+    "sk-another-key": {
+      "label": "Work Account",
+      "refresh_token": "1//another-refresh-token",
+      "client_id": "",
+      "client_secret": ""
+    }
+  }
+}
