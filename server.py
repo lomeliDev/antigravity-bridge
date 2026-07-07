@@ -78,6 +78,7 @@ AUTH_PATH = Path(os.environ.get(
 ))
 
 BRIDGE_API_KEY = os.environ.get("BRIDGE_API_KEY", "")
+BRIDGE_ADMIN_KEY = os.environ.get("BRIDGE_ADMIN_KEY", "")  # protects /admin/* endpoints
 
 # ============================================================
 # Multi-account support
@@ -100,10 +101,10 @@ ACCOUNTS_FILE = Path(os.environ.get(
     str(Path(__file__).resolve().parent / "accounts.json"),
 ))
 
-# Per-account auth cache: antigravity-auth-<keyhash>.json
+# Per-account auth cache: auth_cache/antigravity-auth-<keyhash>.json
 AUTH_CACHE_DIR = Path(os.environ.get(
     "BRIDGE_AUTH_CACHE_DIR",
-    str(Path(__file__).resolve().parent),
+    str(Path(__file__).resolve().parent / "auth_cache"),
 ))
 
 
@@ -1496,13 +1497,29 @@ def subscription_stub():
 
 # ── Admin endpoints ──
 
+def _check_admin() -> tuple | None:
+    """Require BRIDGE_ADMIN_KEY for admin endpoints."""
+    if not BRIDGE_ADMIN_KEY:
+        return None  # no admin key set → allow (for dev/single-user)
+    auth_header = request.headers.get("Authorization", "")
+    provided = auth_header.removeprefix("Bearer ").strip()
+    if provided != BRIDGE_ADMIN_KEY:
+        return ({"error": {"message": "Admin access denied. Use Authorization: Bearer <admin_key>",
+                           "type": "authentication_error"}}, 401)
+    return None
+
+
 @app.route("/admin/accounts", methods=["GET"])
 def admin_list_accounts():
+    if err := _check_admin():
+        return jsonify(err[0]), err[1]
     return jsonify(accounts.list_accounts())
 
 
 @app.route("/admin/accounts", methods=["POST"])
 def admin_add_account():
+    if err := _check_admin():
+        return jsonify(err[0]), err[1]
     body = request.get_json(force=True, silent=True) or {}
     api_key = body.get("api_key", "").strip()
     if not api_key:
@@ -1524,6 +1541,8 @@ def admin_add_account():
 
 @app.route("/admin/accounts/<api_key>", methods=["DELETE"])
 def admin_remove_account(api_key: str):
+    if err := _check_admin():
+        return jsonify(err[0]), err[1]
     try:
         accounts.remove_account(api_key)
         return jsonify({"ok": True, "message": f"Account '{api_key}' removed"}), 200
@@ -1534,6 +1553,8 @@ def admin_remove_account(api_key: str):
 @app.route("/admin/accounts/<api_key>/login", methods=["POST"])
 def admin_login_account(api_key: str):
     """Start OAuth login for a specific account."""
+    if err := _check_admin():
+        return jsonify(err[0]), err[1]
     global _login_account
     a = accounts.resolve(api_key)
     if not a:

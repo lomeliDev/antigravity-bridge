@@ -46,7 +46,7 @@ nohup.out
 .env
 *.env
 antigravity-auth.json
-antigravity-auth-*.json
+auth_cache/
 accounts.json
 secrets/
 
