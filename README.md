@@ -119,21 +119,21 @@ One bridge process → unlimited Google accounts → one API key per account:
 accounts.json:
 {
   "accounts": {
-    "sk-personal-xxx": {
+    "sk-account-one-xxxxxxxxxxxx": {
       "label": "Miguel Personal",
       "refresh_token": "1//...",
       "client_id": "...",
       "client_secret": "..."
     },
-    "sk-work-yyy": {
+    "sk-account-two-yyyyyyyyyyyy": {
       "label": "Work Account", 
       "refresh_token": "1//..."
     }
   }
 }
 
-Authorization: Bearer ***  → Miguel's account
-Authorization: Bearer ***    → Work account
+Authorization: Bearer <your-account-key>  → Miguel's account
+Authorization: Bearer <your-work-key>      → Work account
 ```
 
 Each account gets its own **access token cache** in `auth_cache/`, its own rate limits, and its own model access. Perfect for teams, agencies, or power users.
@@ -164,9 +164,9 @@ Protected by `BRIDGE_ADMIN_KEY` (set in `.env`). All admin calls require `Author
 
 ```bash
 curl -X POST http://127.0.0.1:52848/admin/accounts \
-  -H "Authorization: Bearer ***" \
+  -H "Authorization: Bearer <admin_key>" \
   -H "Content-Type: application/json" \
-  -d '{"api_key": "***", "label": "My New Account"}'
+  -d '{"api_key": "sk-my-new-account", "label": "My New Account"}'
 ```
 
 Response: `{"ok": true, "api_key": "sk-my-new-account"}`
@@ -175,7 +175,7 @@ Response: `{"ok": true, "api_key": "sk-my-new-account"}`
 
 ```bash
 curl -X POST http://127.0.0.1:52848/admin/accounts/sk-my-new-account/login \
-  -H "Authorization: Bearer ***"
+  -H "Authorization: Bearer <admin_key>"
 ```
 
 Returns an `auth_url` — open it in your browser, authorize Google, and the bridge captures the code automatically (localhost callback). Or use manual mode:
@@ -191,21 +191,21 @@ curl -X POST http://127.0.0.1:52848/auth/login/manual \
 
 ```bash
 curl http://127.0.0.1:52848/admin/accounts \
-  -H "Authorization: Bearer *** **"
+  -H "Authorization: Bearer <admin_key>"
 ```
 
 ### Remove an account
 
 ```bash
 curl -X DELETE http://127.0.0.1:52848/admin/accounts/sk-my-new-account \
-  -H "Authorization: Bearer *** **"
+  -H "Authorization: Bearer <admin_key>"
 ```
 
 ### Use the account
 
 ```bash
 curl http://127.0.0.1:52848/v1/chat/completions \
-  -H "Authorization: Bearer ***" \
+  -H "Authorization: Bearer sk-my-new-account" \
   -H "Content-Type: application/json" \
   -d '{"model":"gemini-2.5-flash","messages":[{"role":"user","content":"hello"}]}'
 ```
@@ -383,7 +383,7 @@ curl -s "$BASE/v1/chat/completions" \
 | `401 Invalid API key` | The account key doesn't match any in `accounts.json`. Check with `GET /admin/accounts`. |
 | `invalid_grant` from Google | Token revoked. The bridge auto-clears it. Run login again. |
 | Models list is empty | Token refresh failed. Check `GET /health` for credential status. |
-| Admin `401` | Set `BRIDGE_ADMIN_KEY` in `.env` and pass it as `Authorization: Bearer <key>`. |
+| Admin `401` | Set `BRIDGE_ADMIN_KEY` in `.env` and pass it as `Authorization: Bearer <admin_key>`. |
 
 ---
 
