@@ -247,7 +247,7 @@ class Auth:
     def email(self) -> str | None: return self._email
 
 
-    # ── OAuth login flow (local callback server, like OpenCode) ──
+    # ── OAuth login flow (PKCE + local callback, same as opencode-antigravity-auth) ──
     AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
     SCOPES = (
         "https://www.googleapis.com/auth/cloud-platform "
@@ -260,47 +260,64 @@ class Auth:
     # Internal state for in-progress flow
     _auth_state: str | None = None
     _auth_code: str | None = None
+    _auth_verifier: str | None = None
     _auth_code_event: Any = None  # threading.Event
 
-    def build_auth_url(self, state: str) -> str:
-        """Build the Google OAuth authorization URL."""
+    @staticmethod
+    def _generate_pkce() -> tuple[str, str, str]:
+        """Generate PKCE S256 verifier + challenge. Returns (verifier, challenge, state_payload)."""
+        import hashlib
+        verifier = base64.urlsafe_b64encode(os.urandom(32)).rstrip(b"=").decode()
+        digest = hashlib.sha256(verifier.encode()).digest()
+        challenge = base64.urlsafe_b64encode(digest).rstrip(b"=").decode()
+        # Encode verifier into state like OpenCode: base64url(JSON)
+        payload = json.dumps({"verifier": verifier, "projectId": ""})
+        state = base64.urlsafe_b64encode(payload.encode()).rstrip(b"=").decode()
+        return verifier, challenge, state
+
+    def build_auth_url(self) -> str:
+        """Build the Google OAuth authorization URL with PKCE."""
         from urllib.parse import urlencode
+        verifier, challenge, state = self._generate_pkce()
+        self._auth_verifier = verifier
+        self._auth_state = state
         params = {
             "client_id": self._client_id,
             "redirect_uri": self.REDIRECT_URI,
             "response_type": "code",
             "scope": self.SCOPES,
+            "code_challenge": challenge,
+            "code_challenge_method": "S256",
             "access_type": "offline",
             "prompt": "consent",
             "state": state,
         }
         return f"{self.AUTH_URL}?{urlencode(params)}"
 
-    def exchange_code(self, code: str) -> bool:
-        """Exchange authorization code for tokens. Returns True on success."""
-        r = requests.post(
-            TOKEN_URL,
-            data={
-                "client_id": self._client_id,
-                "client_secret": self._client_secret,
-                "code": code,
-                "redirect_uri": self.REDIRECT_URI,
-                "grant_type": "authorization_code",
-            },
-            timeout=20,
-        )
+    def exchange_code(self, code: str, verifier: str = "") -> bool:
+        """Exchange authorization code + PKCE verifier for tokens. Returns True on success."""
+        data = {
+            "client_id": self._client_id,
+            "client_secret": self._client_secret,
+            "code": code,
+            "redirect_uri": self.REDIRECT_URI,
+            "grant_type": "authorization_code",
+        }
+        if verifier:
+            data["code_verifier"] = verifier
+        r = requests.post(TOKEN_URL, data=data, timeout=20)
         r.raise_for_status()
-        data = r.json()
-        if "refresh_token" not in data:
-            raise RuntimeError(f"No refresh_token in response: {list(data.keys())}")
+        tok = r.json()
+        if "refresh_token" not in tok:
+            raise RuntimeError(f"No refresh_token in response: {list(tok.keys())}")
 
-        self._refresh_token = data["refresh_token"]
-        self._access = data.get("access_token")
+        self._refresh_token = tok["refresh_token"]
+        self._access = tok.get("access_token")
         now_ms = int(time.time() * 1000)
-        self._expires_at = now_ms + int(data.get("expires_in", 3600)) * 1000
+        self._expires_at = now_ms + int(tok.get("expires_in", 3600)) * 1000
 
         # Extract email from id_token
-        if "id_token" in data:
+        if "id_token" in tok:
             try:
                 payload = data["id_token"].split(".")[1]
                 payload += "=" * ((4 - len(payload) % 4) % 4)
@@ -1421,12 +1438,10 @@ def auth_login_start():
     Returns an auth_url to open in a browser. The bridge starts a background
     thread with a local callback server on port 51121 to capture the code."""
     try:
-        state = uuid.uuid4().hex
-        auth._auth_state = state
         auth._auth_code = None
         auth._auth_code_event = threading.Event()
 
-        auth_url = auth.build_auth_url(state)
+        auth_url = auth.build_auth_url()  # PKCE — generates verifier + state internally
 
         # Start callback server in background thread
         def _bg():
@@ -1438,7 +1453,7 @@ def auth_login_start():
         return jsonify({
             "auth_url": auth_url,
             "message": f"Open this URL in your browser and authorize:\n{auth_url}",
-            "state": state,
+            "state": auth._auth_state,
             "expires_in": 120,
         }), 200
     except Exception as e:
@@ -1455,7 +1470,7 @@ def auth_login_manual():
         if not code:
             return jsonify({"error": "No authorization code provided.", "done": False}), 400
 
-        auth.exchange_code(code)
+        auth.exchange_code(code, auth._auth_verifier or "")
         _save_refresh_token_to_env()
 
         return jsonify({
@@ -1481,7 +1496,7 @@ def auth_login_exchange():
         if not auth._auth_code:
             return jsonify({"error": "Authorization failed or was denied.", "done": False}), 400
 
-        auth.exchange_code(auth._auth_code)
+        auth.exchange_code(auth._auth_code, auth._auth_verifier or "")
 
         # Persist the refresh token to .env for future standalone use
         _save_refresh_token_to_env()
