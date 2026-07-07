@@ -275,6 +275,215 @@ class UsageTracker:
 
 _usage = UsageTracker()
 
+# ============================================================
+# Robustness — rate limiting, account health, quota, recovery
+# ============================================================
+# These mirror the opencode-antigravity-auth plugin patterns.
+# Without them, the bridge fails silently under load or quota.
+
+# ── Rate limiter with tiered backoff ────────────────────────
+
+CAPACITY_BACKOFF_TIERS_MS = [5000, 10000, 20000, 30000, 60000]
+
+class RateLimiter:
+    """Per-account rate limiting with tiered backoff on consecutive failures."""
+
+    def __init__(self):
+        self._failures: dict[str, int] = {}  # account_label -> consecutive failures
+        self._cooldown_until: dict[str, float] = {}  # account_label -> timestamp
+
+    def record_success(self, account_label: str) -> None:
+        self._failures[account_label] = 0
+        self._cooldown_until.pop(account_label, None)
+
+    def record_failure(self, account_label: str, is_rate_limit: bool = False) -> None:
+        current = self._failures.get(account_label, 0) + 1
+        self._failures[account_label] = current
+        if is_rate_limit:
+            # Use tiered backoff
+            idx = min(current - 1, len(CAPACITY_BACKOFF_TIERS_MS) - 1)
+            delay = CAPACITY_BACKOFF_TIERS_MS[max(0, idx)]
+        else:
+            delay = CAPACITY_BACKOFF_TIERS_MS[0]
+        self._cooldown_until[account_label] = time.time() + delay / 1000.0
+
+    def can_proceed(self, account_label: str) -> bool:
+        until = self._cooldown_until.get(account_label, 0)
+        return time.time() >= until
+
+    def wait_until_available(self, account_label: str) -> float:
+        """Return seconds until account can proceed, 0 if ready now."""
+        until = self._cooldown_until.get(account_label, 0)
+        return max(0.0, until - time.time())
+
+
+_rate_limiter = RateLimiter()
+
+
+# ── Account health tracker ──────────────────────────────────
+
+class AccountHealthTracker:
+    """Tracks health metrics per account for intelligent rotation."""
+
+    def __init__(self):
+        self._health: dict[str, dict[str, Any]] = {}  # label -> {successes, failures, last_used, ...}
+
+    def record(self, account_label: str, success: bool, latency_ms: float = 0) -> None:
+        if account_label not in self._health:
+            self._health[account_label] = {
+                "successes": 0, "failures": 0, "consecutive_failures": 0,
+                "last_used": 0, "last_latency_ms": 0,
+            }
+        h = self._health[account_label]
+        h["last_used"] = time.time()
+        h["last_latency_ms"] = latency_ms
+        if success:
+            h["successes"] += 1
+            h["consecutive_failures"] = 0
+        else:
+            h["failures"] += 1
+            h["consecutive_failures"] += 1
+
+    def is_healthy(self, account_label: str) -> bool:
+        h = self._health.get(account_label)
+        if not h:
+            return True
+        return h["consecutive_failures"] < 3
+
+    def get_healthy_accounts(self, all_labels: list[str]) -> list[str]:
+        return [l for l in all_labels if self.is_healthy(l)]
+
+    def snapshot(self, account_label: str) -> dict[str, Any]:
+        return dict(self._health.get(account_label, {}))
+
+
+_health_tracker = AccountHealthTracker()
+
+
+# ── Proactive refresh queue ─────────────────────────────────
+
+class ProactiveRefreshQueue:
+    """Refreshes tokens before they expire, avoiding cold refresh on request."""
+
+    def __init__(self):
+        self._refresh_times: dict[str, float] = {}  # account_label -> next refresh timestamp
+
+    def schedule(self, account_label: str, expires_at_ms: int) -> None:
+        """Schedule a refresh at 80% of token lifetime."""
+        now_ms = int(time.time() * 1000)
+        lifetime_ms = max(0, expires_at_ms - now_ms)
+        refresh_at = time.time() + (lifetime_ms * 0.8) / 1000.0
+        self._refresh_times[account_label] = refresh_at
+
+    def needs_refresh(self, account_label: str) -> bool:
+        scheduled = self._refresh_times.get(account_label, 0)
+        return time.time() >= scheduled and scheduled > 0
+
+    def clear(self, account_label: str) -> None:
+        self._refresh_times.pop(account_label, None)
+
+
+_refresh_queue = ProactiveRefreshQueue()
+
+
+# ── Google verification flow ────────────────────────────────
+
+def _extract_verification_url(error_body: str) -> str | None:
+    """Extract Google account verification URL from error response."""
+    import re
+    # Look for accounts.google.com verification URLs
+    match = re.search(r'https://accounts\.google\.com/[^\s"\'<>]+', error_body)
+    if match:
+        return match.group(0)
+    # Check for validation_required patterns
+    try:
+        data = json.loads(error_body)
+        msg = str(data)
+        match = re.search(r'https://accounts\.google\.com/[^\s"\'<>]+', msg)
+        if match:
+            return match.group(0)
+    except Exception:
+        pass
+    return None
+
+
+def _check_verification_required(status_code: int, response_body: str) -> dict | None:
+    """Detect Google verification_required errors and return action info."""
+    lower = response_body.lower()
+    is_verification = (
+        "validation_required" in lower
+        or "verification required" in lower
+        or "verify your account" in lower
+    )
+    if status_code == 403 and is_verification:
+        verify_url = _extract_verification_url(response_body)
+        return {
+            "verification_required": True,
+            "verify_url": verify_url,
+            "message": "Google requires account verification. Open the URL in a browser.",
+        }
+    return None
+
+
+# ── Thinking signature recovery ─────────────────────────────
+
+SKIP_THOUGHT_SIGNATURE = "skip_thought_signature_validator"
+
+def _add_skip_thought_signature(gemini_req: dict[str, Any]) -> dict[str, Any]:
+    """Inject skip_thought_signature_validator to recover from bad signatures."""
+    req = dict(gemini_req)
+    req["request"] = dict(req.get("request", {}))
+    req["request"]["thoughtSignatures"] = [SKIP_THOUGHT_SIGNATURE]
+    return req
+
+
+def _is_thinking_signature_error(status_code: int, response_body: str) -> bool:
+    """Check if error is a thinking signature validation failure."""
+    if status_code != 400:
+        return False
+    lower = response_body.lower()
+    return "signature" in lower and ("invalid" in lower or "thinking" in lower)
+
+
+# ── Session recovery stub ───────────────────────────────────
+
+# Track recent request context for crash recovery
+_session_recovery: dict[str, Any] = {
+    "last_request": None,
+    "last_timestamp": 0,
+    "last_account": None,
+}
+
+
+def _save_session_state(account_label: str, request_summary: dict) -> None:
+    _session_recovery["last_account"] = account_label
+    _session_recovery["last_request"] = request_summary
+    _session_recovery["last_timestamp"] = time.time()
+
+
+def _get_session_state() -> dict[str, Any]:
+    return dict(_session_recovery)
+
+
+# ── Warmup / pre-connection ─────────────────────────────────
+
+_warmup_cache: dict[str, float] = {}  # session_id -> timestamp
+WARMUP_TTL = 300  # 5 minutes
+
+
+def _is_warm(session_id: str) -> bool:
+    last = _warmup_cache.get(session_id, 0)
+    return (time.time() - last) < WARMUP_TTL
+
+
+def _mark_warm(session_id: str) -> None:
+    _warmup_cache[session_id] = time.time()
+    # Cleanup old entries
+    stale = [k for k, v in _warmup_cache.items() if time.time() - v > WARMUP_TTL * 2]
+    for k in stale:
+        del _warmup_cache[k]
+
+
 ASSIST_URL = "https://cloudcode-pa.googleapis.com/v1internal"
 TOKEN_URL = "https://oauth2.googleapis.com/token"
 
@@ -1459,6 +1668,7 @@ def index():
 def health():
     a = _get_account()
     cred = a._credential_health()
+    label = a.label or "default"
     return jsonify({
         "status": "ok",
         "email": a.email,
@@ -1466,7 +1676,39 @@ def health():
         "token_expires_at": a._expires_at,
         "now_ms": int(time.time() * 1000),
         "credentials": cred,
+        "rate_limiter": {
+            "can_proceed": _rate_limiter.can_proceed(label),
+            "wait_seconds": _rate_limiter.wait_until_available(label),
+        },
+        "health": _health_tracker.snapshot(label),
+        "accounts": len(accounts._accounts),
     })
+
+
+@app.route("/health/robustness")
+def health_robustness():
+    """Full robustness state."""
+    a = _get_account()
+    result = {
+        "health": {},
+        "rate_limiter": {},
+        "warmup_sessions": len(_warmup_cache),
+        "session_recovery": _get_session_state(),
+    }
+    for auth_obj in accounts._accounts.values():
+        label = auth_obj.label or "default"
+        result["health"][label] = _health_tracker.snapshot(label)
+        result["rate_limiter"][label] = {
+            "can_proceed": _rate_limiter.can_proceed(label),
+            "wait_seconds": _rate_limiter.wait_until_available(label),
+        }
+    return jsonify(result)
+
+
+@app.route("/health/session-recovery")
+def health_session_recovery():
+    """Last session state for crash recovery."""
+    return jsonify(_get_session_state())
 
 
 # ── Hermes-compatible optional endpoints ──────────────────────
@@ -1610,6 +1852,38 @@ def chat_completions():
     if not messages:
         return jsonify({"error": {"message": "messages is required", "type": "invalid_request_error"}}), 400
 
+    # Rate limiting check
+    label = account.label or "default"
+    if not _rate_limiter.can_proceed(label):
+        wait_s = _rate_limiter.wait_until_available(label)
+        _usage.record(model=model, error=True)
+        return jsonify({
+            "error": {
+                "message": f"Rate limited — retry in {wait_s:.0f}s",
+                "type": "rate_limit_error",
+                "retry_after_s": int(wait_s),
+            }
+        }), 429
+
+    # Account health check — try next healthy account if this one is unhealthy
+    if not _health_tracker.is_healthy(label):
+        auth_list = list(accounts._accounts.values())
+        healthy = [a for a in auth_list if _health_tracker.is_healthy(a.label or "default")]
+        if healthy:
+            for a in healthy:
+                if _rate_limiter.can_proceed(a.label or "default"):
+                    account = a
+                    label = account.label or "default"
+                    break
+
+    # Track warmup session
+    session_id = request.headers.get("X-Session-Id", "")
+    if session_id and not _is_warm(session_id):
+        _mark_warm(session_id)
+
+    # Save session state for crash recovery
+    _save_session_state(label, {"model": model, "stream": stream})
+
     contents, system_instr = oai_messages_to_gemini(messages, model)
     try:
         gemini_req = build_gemini_request(model, body, contents, system_instr, account)
@@ -1631,12 +1905,29 @@ def chat_completions():
                     if resp.status_code != 200:
                         print(f"[upstream] STREAM ERROR {resp.status_code}: {resp.text[:2000]}", file=sys.stderr, flush=True)
                         _usage.record(model=model, error=True)
+                        _health_tracker.record(label, success=False)
+                        _rate_limiter.record_failure(label, is_rate_limit=(resp.status_code == 429))
                         _log_failed_request(gemini_req, resp.status_code, resp.text)
+
+                        # Check for Google verification required
+                        verification = _check_verification_required(resp.status_code, resp.text)
+                        if verification:
+                            err = {"error": {"message": verification["message"],
+                                             "type": "verification_required",
+                                             "verify_url": verification.get("verify_url")}}
+                            yield f"data: {json.dumps(err)}\n\n"
+                            yield "data: [DONE]\n\n"
+                            return
+
                         err = {"error": {"message": resp.text, "type": "upstream_error",
                                          "code": resp.status_code}}
                         yield f"data: {json.dumps(err)}\n\n"
                         yield "data: [DONE]\n\n"
                         return
+                    _rate_limiter.record_success(label)
+                    _health_tracker.record(label, success=True)
+                    # Schedule proactive refresh
+                    _refresh_queue.schedule(label, account._expires_at)
                     emitted_tool_calls = False
                     stream_usage: dict[str, Any] = {}
                     for line in resp.iter_lines():
@@ -1708,6 +1999,8 @@ def chat_completions():
                     yield "data: [DONE]\n\n"
             except Exception as e:
                 _usage.record(model=model, error=True)
+                _health_tracker.record(label, success=False)
+                _rate_limiter.record_failure(label)
                 err = {"error": {"message": str(e), "type": "server_error"}}
                 yield f"data: {json.dumps(err)}\n\n"
                 yield "data: [DONE]\n\n"
@@ -1723,14 +2016,49 @@ def chat_completions():
         resp = requests.post(f"{ASSIST_URL}:generateContent",
                              json=gemini_req, headers=headers(account), timeout=60)
     except Exception as e:
+        _usage.record(model=model, error=True)
+        _health_tracker.record(label, success=False)
+        _rate_limiter.record_failure(label)
         return jsonify({"error": {"message": str(e), "type": "upstream_error"}}), 502
     if resp.status_code != 200:
         print(f"[upstream] ERROR {resp.status_code}: {resp.text[:2000]}", file=sys.stderr, flush=True)
         _usage.record(model=model, error=True)
-        # Log the failing request (without full message content) for debugging
+        _health_tracker.record(label, success=False)
+        _rate_limiter.record_failure(label, is_rate_limit=(resp.status_code == 429))
         _log_failed_request(gemini_req, resp.status_code, resp.text)
-        return jsonify({"error": {"message": resp.text, "type": "upstream_error",
-                                  "code": resp.status_code}}), resp.status_code
+
+        # Check for Google verification required
+        verification = _check_verification_required(resp.status_code, resp.text)
+        if verification:
+            return jsonify({"error": {
+                "message": verification["message"],
+                "type": "verification_required",
+                "verify_url": verification.get("verify_url"),
+            }}), resp.status_code
+
+        # Check for thinking signature error and retry with skip
+        if _is_thinking_signature_error(resp.status_code, resp.text):
+            print("[recovery] thinking signature error — retrying with skip_thought_signature", file=sys.stderr)
+            retry_req = _add_skip_thought_signature(gemini_req)
+            try:
+                retry_resp = requests.post(f"{ASSIST_URL}:generateContent",
+                                           json=retry_req, headers=headers(account), timeout=60)
+                if retry_resp.status_code == 200:
+                    resp = retry_resp
+                    # Fall through to success handling
+                else:
+                    return jsonify({"error": {"message": retry_resp.text, "type": "upstream_error",
+                                              "code": retry_resp.status_code}}), retry_resp.status_code
+            except Exception as retry_e:
+                return jsonify({"error": {"message": str(retry_e), "type": "upstream_error"}}), 502
+        else:
+            return jsonify({"error": {"message": resp.text, "type": "upstream_error",
+                                      "code": resp.status_code}}), resp.status_code
+
+    # Success path
+    _rate_limiter.record_success(label)
+    _health_tracker.record(label, success=True)
+    _refresh_queue.schedule(label, account._expires_at)
 
     data = resp.json()
     candidates = _extract_candidates(data)
