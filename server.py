@@ -28,6 +28,7 @@ import base64
 import datetime
 import json
 import os
+import random
 import re
 import sys
 import threading
@@ -36,8 +37,55 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+import logging
+import traceback
+
 import requests
 from flask import Flask, Response, jsonify, request
+
+
+# ── .env loader (sin python-dotenv) ─────────────────────────────
+# `source .env` en la shell NO exporta las variables al proceso de Python a
+# menos que lleven `export`. Para no depender de eso, cargamos .env aquí
+# (sin pisar variables ya exportadas).
+def _load_dotenv(path: "Path") -> int:
+    if not path.exists():
+        return 0
+    loaded = 0
+    for raw in path.read_text().splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        if line.startswith("export "):
+            line = line[7:].strip()
+        k, _, v = line.partition("=")
+        k, v = k.strip(), v.strip()
+        if len(v) >= 2 and v[0] == v[-1] and v[0] in "\"'":
+            v = v[1:-1]
+        if k and k not in os.environ:
+            os.environ[k] = v
+            loaded += 1
+    return loaded
+
+
+_DOTENV_LOADED = _load_dotenv(Path(__file__).resolve().parent / ".env")
+
+# ── Debug / logging ──────────────────────────────────────────────
+# BRIDGE_DEBUG=1  -> tracebacks completos en errores 500 y log de cada request upstream
+BRIDGE_DEBUG = os.environ.get("BRIDGE_DEBUG", "").lower() in ("1", "true", "yes", "on")
+logging.basicConfig(
+    level=logging.DEBUG if BRIDGE_DEBUG else logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    stream=sys.stderr,
+)
+log = logging.getLogger("bridge")
+
+
+def _log_exc(where: str) -> str:
+    """Log an exception with traceback (always in debug, message-only otherwise). Returns the message."""
+    msg = traceback.format_exc() if BRIDGE_DEBUG else str(sys.exc_info()[1])
+    log.error("%s: %s", where, msg)
+    return msg
 
 # ============================================================
 # Config
@@ -51,14 +99,29 @@ from flask import Flask, Response, jsonify, request
 # and are NOT confidential (desktop OAuth clients use PKCE for security).
 # Values default to the npm package's public constants; override via env vars
 # or .env file if Google ever rotates them.
-ANTIGRAVITY_CLIENT_ID = os.environ.get(
-    "ANTIGRAVITY_CLIENT_ID",
-    "",
+# OAuth client de Antigravity (el mismo que usa agy y el plugin
+# opencode-antigravity-auth). Van en .env — GitHub push-protection bloquea
+# cualquier commit que los contenga, así que NO se hardcodean aquí.
+# Valores: ver README ("OAuth client") o sacarlos del plugin:
+#   npm pack opencode-antigravity-auth && grep -rho 'CLIENT_[A-Z]* = "[^"]*' package/
+ANTIGRAVITY_CLIENT_ID = os.environ.get("ANTIGRAVITY_CLIENT_ID", "")
+ANTIGRAVITY_CLIENT_SECRET = os.environ.get("ANTIGRAVITY_CLIENT_SECRET", "")
+
+# --- Fingerprint del Antigravity CLI (capturado con mitmproxy, agy 1.1.28, sep 2026) ---
+# UA:   antigravity/cli/1.1.28 (aidev_client; os_type=linux; arch=amd64; cl=978129418; auth_method=consumer)
+# Host: daily-cloudcode-pa.googleapis.com  (el IDE viejo usaba cloudcode-pa)
+# El CLI NO manda X-Goog-Api-Client.
+AGY_CLI_VERSION = os.environ.get("AGY_CLI_VERSION", "1.1.28")
+AGY_CLI_CL = os.environ.get("AGY_CLI_CL", "978129418")
+AGY_AUTH_METHOD = os.environ.get("AGY_AUTH_METHOD", "consumer")   # consumer = cuenta Google AI (Ultra/Pro)
+AGY_USER_AGENT = (
+    f"antigravity/cli/{AGY_CLI_VERSION} (aidev_client; os_type=linux; arch=amd64; "
+    f"cl={AGY_CLI_CL}; auth_method={AGY_AUTH_METHOD})"
 )
-ANTIGRAVITY_CLIENT_SECRET = os.environ.get(
-    "ANTIGRAVITY_CLIENT_SECRET",
-    "",
-)
+# Project fijo que manda el CLI con auth consumer. loadCodeAssist sigue disponible para Workspace.
+AGY_CONSUMER_PROJECT = os.environ.get("AGY_CONSUMER_PROJECT", "aicode-consumers")
+# thinkingBudget por sufijo de effort (low=1000 capturado; medium/high: ajustar tras capturar)
+AGY_THINKING_BUDGET = {"low": 1000, "medium": 8000, "high": 32000}
 
 # Refresh token — set via BRIDGE_REFRESH_TOKEN env var or .env file.
 # On first run, the bridge falls back to OpenCode's accounts.json for
@@ -484,14 +547,14 @@ def _mark_warm(session_id: str) -> None:
         del _warmup_cache[k]
 
 
-ASSIST_URL = "https://cloudcode-pa.googleapis.com/v1internal"
+ASSIST_URL = os.environ.get("ANTIGRAVITY_ASSIST_URL", "https://daily-cloudcode-pa.googleapis.com/v1internal")
 TOKEN_URL = "https://oauth2.googleapis.com/token"
 
 # Models that are known to be broken through the Antigravity API.
 # These are filtered from the /v1/models listing to avoid confusing users.
 _BROKEN_MODELS: frozenset[str] = frozenset({
     "gemini-2.5-pro",       # 503 "No capacity" — consistently unavailable
-    "gemini-3.1-pro-high",  # 400 INVALID_ARGUMENT — unsupported by API
+    # gemini-3.1-pro-high: funcionaba en agy 1.1.28 con el body nuevo (thinkingConfig/requestType); re-habilitado
 })
 MODELS: list[dict[str, Any]] = [
     {"id": "gemini-2.5-pro",             "object": "model", "owned_by": "google", "created": 1735689600},
@@ -507,7 +570,12 @@ class Auth:
     """Holds OAuth credentials for a single Google account."""
 
     AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
+    # Scopes del Antigravity CLI 1.1.28 (tokeninfo del token real, sep 2026).
+    # "aicode" es NUEVO: sin él daily-cloudcode-pa responde 401. Un refresh_token viejo
+    # no lo trae -> hay que re-hacer login (nuevo consentimiento) tras actualizar.
     SCOPES = (
+        "openid "
+        "https://www.googleapis.com/auth/aicode "
         "https://www.googleapis.com/auth/cloud-platform "
         "https://www.googleapis.com/auth/userinfo.email "
         "https://www.googleapis.com/auth/userinfo.profile "
@@ -533,7 +601,7 @@ class Auth:
         self._client_secret: str | None = client_secret or None
         self._refresh_token: str | None = refresh_token or None
         self._project_id: str | None = None
-        self._user_agent = "antigravity/2.0.6 darwin/arm64"
+        self._user_agent = AGY_USER_AGENT
         self._api_client = "google-cloud-sdk vscode_cloudshelleditor/0.1"
         self._email: str | None = None
         # OAuth flow state
@@ -685,7 +753,6 @@ class Auth:
                 "Authorization": f"Bearer {at}",
                 "Content-Type": "application/json",
                 "User-Agent": self._user_agent,
-                "X-Goog-Api-Client": self._api_client,
             },
             timeout=30,
         )
@@ -696,7 +763,8 @@ class Auth:
         elif isinstance(proj, str):
             self._project_id = proj
         if not self._project_id:
-            raise RuntimeError("loadCodeAssist did not return cloudaicompanionProject")
+            # Cuentas consumer (Google AI Pro/Ultra): el CLI manda un project fijo.
+            self._project_id = AGY_CONSUMER_PROJECT
         self._persist()
         return self._project_id
 
@@ -794,6 +862,8 @@ def _save_account_token(a: Auth) -> None:
 
 
 # ── Global instances ──
+log.info(".env: %d vars cargadas | debug=%s | assist=%s | ua=%s",
+         _DOTENV_LOADED, BRIDGE_DEBUG, os.environ.get("ANTIGRAVITY_ASSIST_URL", "daily (default)"), AGY_USER_AGENT)
 accounts = AccountManager()
 _default_account: Auth | None = list(accounts._accounts.values())[0] if accounts._accounts else None
 app = Flask(__name__)
@@ -1115,22 +1185,48 @@ def build_gemini_request(model: str, body: dict[str, Any], contents: list,
         "maxOutputTokens": max_output,
         "topP": body.get("top_p", 0.95),
     }
+    # thinkingConfig como lo manda agy: el effort viene horneado en el id (-low/-medium/-high).
+    effort = _effort_from_model(model_id)
+    if effort:
+        generation_config["thinkingConfig"] = {
+            "includeThoughts": bool(body.get("include_thoughts", False)),
+            "thinkingBudget": int(body.get("thinking_budget", AGY_THINKING_BUDGET.get(effort, 1000))),
+        }
+    else:
+        generation_config["thinkingConfig"] = {"includeThoughts": False, "thinkingBudget": 0}
     if "seed" in body and isinstance(body["seed"], int):
         generation_config["seed"] = body["seed"]
     n = body.get("n", 1)
     if isinstance(n, int) and n > 1:
         generation_config["candidateCount"] = min(n, 8)
     _apply_response_format(body, generation_config)
+    conv_id = str(uuid.uuid4())
+    traj_id = str(uuid.uuid4())
+    is_claude = _is_claude_model(model_id)
+    is_non_gemini = not model_id.lower().startswith("gemini")
     req: dict[str, Any] = {
         "project": account.get_project_id(),
+        # Formato del CLI: agent/<conversation>/<epoch_ms>/<trajectory>/<step>
+        "requestId": f"agent/{conv_id}/{int(time.time()*1000)}/{traj_id}/1",
         "model": model_id,
+        "userAgent": "antigravity",
+        "requestType": "agent",
         "request": {
             "contents": contents,
             "generationConfig": generation_config,
+            "sessionId": str(random.randint(-(2**63), 2**63 - 1)),
+            "labels": {
+                "last_step_index": "0",
+                "request_id": f"{traj_id}-0",
+                "trajectory_id": traj_id,
+                "used_claude": "true" if is_claude else "false",
+                "used_claude_conservative": "false",
+                "used_non_gemini_model": "true" if is_non_gemini else "false",
+            },
         },
     }
     if system_instr:
-        req["request"]["systemInstruction"] = {"parts": [{"text": system_instr}]}
+        req["request"]["systemInstruction"] = {"role": "user", "parts": [{"text": system_instr}]}
     stop = body.get("stop")
     if stop:
         req["request"]["generationConfig"]["stopSequences"] = (
@@ -1155,7 +1251,7 @@ def headers(account: Auth | None = None) -> dict[str, str]:
         "Authorization": f"Bearer {a.get_token()}",
         "Content-Type": "application/json",
         "User-Agent": a.user_agent,
-        "X-Goog-Api-Client": a.api_client,
+        "Accept-Encoding": "gzip",
     }
 
 
@@ -1205,6 +1301,14 @@ def extract_text(payload: dict[str, Any]) -> str:
 
 def _is_claude_model(model_id: str) -> bool:
     return model_id.lower().startswith("claude-")
+
+
+def _effort_from_model(model_id: str) -> str | None:
+    """agy hornea el effort en el id: gemini-3.8-flash-low -> 'low'."""
+    for e in ("low", "medium", "high"):
+        if model_id.endswith("-" + e):
+            return e
+    return None
 
 
 # JSON Schema fields that Gemini Function Calling rejects outright.
@@ -1666,13 +1770,27 @@ def index():
 
 @app.route("/health")
 def health():
-    a = _get_account()
+    # /health nunca debe dar 500: sin cuenta configurada responde "no_account"
+    # (es el estado normal justo después de instalar, antes del login).
+    try:
+        a = _get_account()
+    except RuntimeError:
+        return jsonify({
+            "status": "no_account",
+            "message": "No hay cuenta configurada. Haz login: POST /auth/login (o python3 auth-login.py)",
+            "accounts": len(accounts._accounts),
+            "debug": BRIDGE_DEBUG,
+        }), 200
     cred = a._credential_health()
     label = a.label or "default"
+    try:
+        project_id = a.get_project_id()
+    except Exception:
+        project_id = None
     return jsonify({
-        "status": "ok",
+        "status": "ok" if a._refresh_token else "needs_login",
         "email": a.email,
-        "project_id": a.get_project_id(),
+        "project_id": project_id,
         "token_expires_at": a._expires_at,
         "now_ms": int(time.time() * 1000),
         "credentials": cred,
@@ -1896,6 +2014,9 @@ def chat_completions():
     stream_options = body.get("stream_options") or {}
     include_usage = bool(stream_options.get("include_usage"))
 
+    if BRIDGE_DEBUG:
+        log.debug("upstream request model=%s requestId=%s body=%s", gemini_req.get("model"),
+                  gemini_req.get("requestId"), json.dumps(gemini_req)[:4000])
     if stream:
         def gen():
             try:
@@ -2173,12 +2294,30 @@ def _start_callback_server(port: int, timeout: float = 120.0, event: threading.E
 _login_account: Auth | None = None
 
 
+def _ensure_login_account() -> "Auth":
+    """Cuenta para hacer login. Si no existe ninguna (instalación nueva, sin
+    BRIDGE_REFRESH_TOKEN ni accounts.json) se crea una vacía 'default' para
+    que el flujo OAuth pueda arrancar; el refresh_token se guarda al terminar."""
+    global _default_account
+    try:
+        return _get_account()
+    except RuntimeError:
+        key = BRIDGE_API_KEY or "default"
+        log.info("no account configured — creating empty '%s' account for login", key)
+        a = accounts.add_account(key, label="default (login)")
+        _default_account = a
+        return a
+
+
+
 @app.route("/auth/login", methods=["POST"])
 def auth_login_start():
     """Start OAuth login for the default account."""
     global _login_account
     try:
-        a = _get_account()
+        a = _ensure_login_account()
+        if not a._client_id or not a._client_secret:
+            raise RuntimeError("ANTIGRAVITY_CLIENT_ID/SECRET vacíos — define en .env")
         a._auth_code = None
         a._auth_code_event = threading.Event()
         _login_account = a
@@ -2197,13 +2336,13 @@ def auth_login_start():
             "state": a._auth_state,
             "expires_in": 120,
         }), 200
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+    except Exception:
+        return jsonify({"error": _log_exc("/auth/login")}), 500
 
 
 @app.route("/auth/login/manual", methods=["POST"])
 def auth_login_manual():
-    a = _login_account or _get_account()
+    a = _login_account or _ensure_login_account()
     try:
         body = request.get_json(force=True, silent=True) or {}
         code = body.get("code", "").strip()
