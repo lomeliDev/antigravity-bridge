@@ -1280,6 +1280,17 @@ def build_gemini_request(model: str, body: dict[str, Any], contents: list,
                          system_instr: str, account: Auth) -> dict[str, Any]:
     # Antigravity expects the model id without the "models/" prefix.
     model_id = model[7:] if model.startswith("models/") else model
+    # OpenAI `reasoning_effort` (low|medium|high): en Antigravity el effort va horneado en el id
+    # (gemini-3.8-flash-high). Si el cliente manda el modelo sin sufijo + reasoning_effort,
+    # lo componemos; si ya trae sufijo y además reasoning_effort, gana reasoning_effort.
+    re_effort = str(body.get("reasoning_effort") or "").lower().strip()
+    if re_effort in ("low", "medium", "high") and not _is_claude_model(model_id) and not model_id.startswith("gpt-"):
+        base = model_id
+        cur = _effort_from_model(model_id)
+        if cur:
+            base = model_id[: -(len(cur) + 1)]
+        if _model_has_effort_variants(base):
+            model_id = f"{base}-{re_effort}"
 
     # Warn about OpenAI params that Antigravity does not support.
     _UNSUPPORTED_PARAMS = ("logprobs", "frequency_penalty", "presence_penalty", "logit_bias", "top_logprobs")
@@ -1410,6 +1421,14 @@ def extract_text(payload: dict[str, Any]) -> str:
 
 def _is_claude_model(model_id: str) -> bool:
     return model_id.lower().startswith("claude-")
+
+
+def _model_has_effort_variants(base: str) -> bool:
+    try:
+        ids = {m["id"] for m in fetch_available_models()}
+    except Exception:
+        return True  # sin catálogo, asumir que sí
+    return any(f"{base}-{e}" in ids for e in ("low", "medium", "high"))
 
 
 def _effort_from_model(model_id: str) -> str | None:
@@ -2005,6 +2024,21 @@ def admin_list_accounts():
             except Exception as e:
                 entry["quota"] = {"error": str(e)[:200]}
     return jsonify(result)
+
+
+@app.route("/admin/models/raw", methods=["GET"])
+def admin_models_raw():
+    """JSON crudo de fetchAvailableModels (metadata completa por modelo: contexto, límites, modalidades...)."""
+    if err := _check_admin():
+        return jsonify(err[0]), err[1]
+    try:
+        a = _get_account()
+        r = requests.post(f"{ASSIST_URL}:fetchAvailableModels", headers=headers(a),
+                          json={"project": a.get_project_id()}, timeout=30)
+        r.raise_for_status()
+        return jsonify(r.json())
+    except Exception:
+        return jsonify({"error": _log_exc("/admin/models/raw")}), 502
 
 
 @app.route("/admin/accounts/<api_key>/quota", methods=["GET"])
