@@ -296,6 +296,16 @@ model_list:
 
 ---
 
+## 🆕 Rama `dev` — sep 2026
+
+- Protocolo del **Antigravity CLI 1.1.28** (`daily-cloudcode-pa`, UA del CLI, body `agent`, scope `aicode`). Ver `AGY-CLI-PROTOCOL.md`.
+- **Quota real de Google por cuenta**: `GET /v1/quota`, `GET /admin/accounts/<key>/quota`, `GET /admin/accounts?quota=1` (4 buckets: gemini/claude × weekly/5h, % usado + reset). Cache 30s (`BRIDGE_QUOTA_TTL`).
+- **Entrada multimodal**: además de `image_url`, acepta `input_audio` (OpenAI), `file` (`file_data` data-URI o `file_url`: PDF, texto, video, audio) y extensiones `video_url` / `audio_url`. Se mandan como `inlineData` al modelo (límite 50 MB).
+- `GET /v1/models?cli=1` → solo los modelos del picker de `agy` (14); sin parámetro → todo `fetchAvailableModels` (~25).
+- Primer arranque sin cuenta: `/auth/login` crea la cuenta `default` (antes 500); `/health` responde `no_account`/`needs_login`.
+- `server.py` carga `.env` solo (sin python-dotenv). `BRIDGE_DEBUG=1` → tracebacks + log de requests upstream.
+- OAuth `ANTIGRAVITY_CLIENT_ID/SECRET` van en `.env` (GitHub bloquea commits que los contengan).
+
 ## 📡 API reference
 
 | Method | Endpoint | Auth | Description |

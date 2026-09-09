@@ -974,6 +974,57 @@ def fetch_available_models(account: Auth | None = None) -> list[dict[str, Any]]:
 
 
 # ============================================================
+# Quota real de Google (por cuenta)
+# ============================================================
+_QUOTA_CACHE: dict[str, tuple[float, dict]] = {}
+QUOTA_CACHE_TTL = int(os.environ.get("BRIDGE_QUOTA_TTL", "30"))
+
+
+def fetch_quota(account: Auth, use_cache: bool = True) -> dict[str, Any]:
+    """Quota de Antigravity para una cuenta: 4 buckets (gemini/3p x weekly/5h) en % usado.
+    Mismo endpoint que usa el CLI (retrieveUserQuotaSummary)."""
+    key = account.api_key or "default"
+    now = time.time()
+    if use_cache and key in _QUOTA_CACHE and now - _QUOTA_CACHE[key][0] < QUOTA_CACHE_TTL:
+        return _QUOTA_CACHE[key][1]
+    r = requests.post(
+        f"{ASSIST_URL}:retrieveUserQuotaSummary",
+        headers=headers(account),
+        json={"project": account.get_project_id()},
+        timeout=20,
+    )
+    r.raise_for_status()
+    raw = r.json()
+    groups = raw.get("groups") or raw.get("response", {}).get("groups") or []
+    buckets: dict[str, Any] = {}
+    for g in groups:
+        for b in g.get("buckets", []):
+            bid = b.get("bucketId", "")
+            remaining = float(b.get("remainingFraction", 1.0) or 0.0)
+            buckets[bid] = {
+                "group": g.get("displayName"),
+                "window": b.get("window"),
+                "used_pct": round((1 - remaining) * 100, 2),
+                "remaining_pct": round(remaining * 100, 2),
+                "reset_at": b.get("resetTime"),
+            }
+    out = {
+        "email": account.email,
+        "label": account.label,
+        "project": account.get_project_id(),
+        "buckets": buckets,
+        # atajos para dashboards
+        "gemini_weekly_used": buckets.get("gemini-weekly", {}).get("used_pct"),
+        "gemini_5h_used": buckets.get("gemini-5h", {}).get("used_pct"),
+        "claude_weekly_used": buckets.get("3p-weekly", {}).get("used_pct"),
+        "claude_5h_used": buckets.get("3p-5h", {}).get("used_pct"),
+        "fetched_at": int(now),
+    }
+    _QUOTA_CACHE[key] = (now, out)
+    return out
+
+
+# ============================================================
 # Helpers
 # ============================================================
 def _download_image(url: str, timeout: int = 20) -> tuple[str, str]:
@@ -1009,9 +1060,67 @@ def oai_content_to_gemini_parts(content: str | list[Any]) -> list[dict[str, Any]
                 except Exception as e:
                     print(f"[vision] warn: {e}", file=sys.stderr, flush=True)
                     parts.append({"text": "[image unavailable]"})
+        elif itype == "input_audio":
+            # OpenAI: {"type":"input_audio","input_audio":{"data":"<b64>","format":"wav|mp3|..."}}
+            ia = item.get("input_audio", {}) or {}
+            fmt = str(ia.get("format", "wav")).lower()
+            mime = _AUDIO_MIME.get(fmt, f"audio/{fmt}")
+            if ia.get("data"):
+                parts.append({"inlineData": {"mimeType": mime, "data": ia["data"]}})
+        elif itype in ("file", "video_url", "audio_url"):
+            # OpenAI: {"type":"file","file":{"file_data":"data:application/pdf;base64,...","filename":"x.pdf"}}
+            #         {"type":"file","file":{"file_url":"https://..."}}   (extensión no estándar)
+            # Extensiones: {"type":"video_url","video_url":{"url":...}}, {"type":"audio_url","audio_url":{"url":...}}
+            spec = item.get(itype, {}) or {}
+            url = spec.get("file_data") or spec.get("file_url") or spec.get("url") or ""
+            if isinstance(spec, str):
+                url = spec
+            try:
+                mime, b64 = _download_blob(url, hint_name=spec.get("filename", "") if isinstance(spec, dict) else "")
+                parts.append({"inlineData": {"mimeType": mime, "data": b64}})
+            except Exception as e:
+                print(f"[files] warn: {e}", file=sys.stderr, flush=True)
+                parts.append({"text": f"[{itype} unavailable]"})
     if not parts:
         parts = [{"text": " "}]
     return parts
+
+
+_AUDIO_MIME = {
+    "wav": "audio/wav", "mp3": "audio/mp3", "mpeg": "audio/mpeg", "m4a": "audio/m4a",
+    "aac": "audio/aac", "ogg": "audio/ogg", "opus": "audio/opus", "flac": "audio/flac",
+    "webm": "audio/webm", "pcm16": "audio/l16",
+}
+_EXT_MIME = {
+    ".pdf": "application/pdf", ".txt": "text/plain", ".md": "text/markdown", ".csv": "text/csv",
+    ".json": "application/json", ".html": "text/html", ".xml": "text/xml", ".py": "text/x-python",
+    ".js": "text/javascript", ".ts": "application/x-typescript",
+    ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp",
+    ".heic": "image/heic", ".heif": "image/heif",
+    ".mp4": "video/mp4", ".webm": "video/webm", ".mov": "video/quicktime",
+    ".wav": "audio/wav", ".mp3": "audio/mp3", ".m4a": "audio/m4a", ".ogg": "audio/ogg", ".flac": "audio/flac",
+}
+
+
+def _download_blob(url: str, hint_name: str = "", timeout: int = 60, max_bytes: int = 50 * 1024 * 1024) -> tuple[str, str]:
+    """(mime, base64) para data URIs o URLs http(s). Para PDF/audio/video/texto."""
+    if url.startswith("data:"):
+        header, _, b64 = url.partition(",")
+        mime = header.split(";")[0].replace("data:", "")
+        return mime or "application/octet-stream", b64
+    if not url:
+        raise ValueError("empty file url")
+    r = requests.get(url, headers={"User-Agent": "antigravity-bridge/0.1"}, timeout=timeout, stream=True)
+    r.raise_for_status()
+    data = r.raw.read(max_bytes + 1)
+    if len(data) > max_bytes:
+        raise ValueError(f"file too large (> {max_bytes} bytes)")
+    mime = r.headers.get("Content-Type", "").split(";")[0].strip()
+    if not mime or mime == "application/octet-stream":
+        import os.path as _osp
+        ext = _osp.splitext((hint_name or url.split("?")[0]).lower())[1]
+        mime = _EXT_MIME.get(ext, mime or "application/octet-stream")
+    return mime, base64.b64encode(data).decode("ascii")
 
 
 def _tool_call_id_to_name(messages: list[dict[str, Any]]) -> dict[str, str]:
@@ -1755,16 +1864,23 @@ def _get_account() -> "Auth":
 # ============================================================
 @app.route("/")
 def index():
-    a = _get_account()
+    try:
+        a = _get_account()
+        email, project = a.email, (a.get_project_id() if a._refresh_token else None)
+    except Exception:
+        email, project = None, None
     return jsonify({
         "name": "antigravity-bridge",
-        "version": "0.1.0",
+        "version": "0.2.0-dev",
         "multi_account": True,
         "accounts": len(accounts._accounts),
         "openai_compatible": True,
-        "email": a.email,
-        "project_id": a.get_project_id(),
-        "endpoints": ["/health", "/v1/models", "/v1/chat/completions", "/v1/usage", "/admin/accounts"],
+        "email": email,
+        "project_id": project,
+        "upstream": ASSIST_URL,
+        "endpoints": ["/health", "/v1/models", "/v1/chat/completions", "/v1/usage", "/v1/quota",
+                      "/admin/accounts", "/admin/accounts?quota=1", "/admin/accounts/<key>/quota",
+                      "/admin/accounts/<key>/login", "/auth/login", "/login"],
     })
 
 
@@ -1871,9 +1987,53 @@ def _check_admin() -> tuple | None:
 
 @app.route("/admin/accounts", methods=["GET"])
 def admin_list_accounts():
+    """Lista cuentas. ?quota=1 agrega la quota real de Google de cada una (1 request por cuenta, cacheada)."""
     if err := _check_admin():
         return jsonify(err[0]), err[1]
-    return jsonify(accounts.list_accounts())
+    result = accounts.list_accounts()
+    if request.args.get("quota") in ("1", "true", "yes"):
+        for entry in result:
+            a = accounts._accounts.get(entry["api_key"])
+            if not a or not a._refresh_token:
+                entry["quota"] = None
+                continue
+            try:
+                q = fetch_quota(a)
+                entry["quota"] = {k: q[k] for k in ("gemini_weekly_used", "gemini_5h_used",
+                                                     "claude_weekly_used", "claude_5h_used", "fetched_at")}
+                entry["email"] = q.get("email") or entry.get("email")
+            except Exception as e:
+                entry["quota"] = {"error": str(e)[:200]}
+    return jsonify(result)
+
+
+@app.route("/admin/accounts/<api_key>/quota", methods=["GET"])
+def admin_account_quota(api_key: str):
+    """Quota real de Google para una cuenta (4 buckets con % usado y reset). ?refresh=1 salta el cache."""
+    if err := _check_admin():
+        return jsonify(err[0]), err[1]
+    a = accounts._accounts.get(api_key)
+    if not a:
+        return jsonify({"error": f"Account '{api_key}' not found"}), 404
+    if not a._refresh_token:
+        return jsonify({"error": "account not authenticated", "api_key": api_key}), 409
+    try:
+        return jsonify(fetch_quota(a, use_cache=request.args.get("refresh") not in ("1", "true")))
+    except Exception:
+        return jsonify({"error": _log_exc(f"quota {api_key}")}), 502
+
+
+@app.route("/v1/quota", methods=["GET"])
+def v1_quota():
+    """Quota real de Google para la cuenta del request (según su API key / default)."""
+    try:
+        a = _get_account()
+    except RuntimeError as e:
+        return jsonify({"error": str(e)}), 401
+    try:
+        return jsonify(fetch_quota(a, use_cache=request.args.get("refresh") not in ("1", "true")))
+    except Exception:
+        return jsonify({"error": _log_exc("/v1/quota")}), 502
 
 
 @app.route("/admin/accounts", methods=["POST"])
@@ -1944,7 +2104,12 @@ def admin_login_account(api_key: str):
 
 @app.route("/v1/models")
 def list_models():
-    return jsonify({"object": "list", "data": fetch_available_models()})
+    """Modelos disponibles (fetchAvailableModels del backend, cacheado).
+    ?cli=1 -> solo los 14 que muestra `agy models` (los que tienen effort horneado o son 3p)."""
+    data = fetch_available_models()
+    if request.args.get("cli") in ("1", "true"):
+        data = [m for m in data if _effort_from_model(m["id"]) or _is_claude_model(m["id"]) or m["id"].startswith("gpt-")]
+    return jsonify({"object": "list", "data": data})
 
 
 @app.route("/v1/models/<path:model_id>")
