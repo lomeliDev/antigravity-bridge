@@ -1320,7 +1320,18 @@ def build_gemini_request(model: str, body: dict[str, Any], contents: list,
     if isinstance(n, int) and n > 1:
         generation_config["candidateCount"] = min(n, 8)
     _apply_response_format(body, generation_config)
-    conv_id = str(uuid.uuid4())
+    # `user` (OpenAI) / X-Session-Id -> sessionId y conversation_id deterministas por usuario.
+    # Antigravity no guarda estado entre requests (todo viaja en `contents`), pero un sessionId
+    # estable agrupa la actividad del mismo usuario y ayuda al cache de prompt del backend.
+    user_key = str(body.get("user") or request.headers.get("X-Session-Id", "") or "").strip()
+    if user_key:
+        import hashlib as _hl
+        h = _hl.sha256(f"{account.api_key}:{user_key}".encode()).digest()
+        conv_id = str(uuid.UUID(bytes=h[:16]))
+        session_id = str(int.from_bytes(h[16:24], "big", signed=True))
+    else:
+        conv_id = str(uuid.uuid4())
+        session_id = str(random.randint(-(2**63), 2**63 - 1))
     traj_id = str(uuid.uuid4())
     is_claude = _is_claude_model(model_id)
     is_non_gemini = not model_id.lower().startswith("gemini")
@@ -1334,7 +1345,7 @@ def build_gemini_request(model: str, body: dict[str, Any], contents: list,
         "request": {
             "contents": contents,
             "generationConfig": generation_config,
-            "sessionId": str(random.randint(-(2**63), 2**63 - 1)),
+            "sessionId": session_id,
             "labels": {
                 "last_step_index": "0",
                 "request_id": f"{traj_id}-0",
