@@ -1426,15 +1426,50 @@ def build_gemini_request(model: str, body: dict[str, Any], contents: list,
         req["request"]["generationConfig"]["stopSequences"] = (
             stop if isinstance(stop, list) else [stop]
         )
-    tools = body.get("tools")
-    if tools:
-        gemini_tools = oai_tools_to_antigravity(tools)
-        if gemini_tools:
-            req["request"]["tools"] = gemini_tools
+    tools = body.get("tools") or []
+    native_tools, function_tools = _split_native_tools(tools, body)
+    gemini_tools: list[dict[str, Any]] = []
+    if function_tools:
+        gemini_tools += oai_tools_to_antigravity(function_tools)
+    gemini_tools += native_tools
+    if gemini_tools:
+        req["request"]["tools"] = gemini_tools
+        if function_tools:
             mode = oai_tool_choice_to_mode(body.get("tool_choice"), _is_claude_model(model_id))
             if mode:
                 req["request"]["toolConfig"] = {"functionCallingConfig": {"mode": mode}}
     return req
+
+
+# Tools nativas del backend de Antigravity (verificadas en vivo, sep 2026):
+#   googleSearch (grounding con Google), urlContext (leer URLs del prompt), codeExecution (sandbox).
+# Se activan con vocabulario OpenAI/Responses-API o con flags en el body.
+_NATIVE_TOOL_ALIASES = {
+    "web_search": "googleSearch", "web_search_preview": "googleSearch", "google_search": "googleSearch",
+    "url_context": "urlContext", "url_fetch": "urlContext",
+    "code_execution": "codeExecution", "code_interpreter": "codeExecution",
+}
+
+
+def _split_native_tools(tools: list, body: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Separa tools OpenAI en (nativas Gemini, function tools). También lee body.web_search / web_search_options."""
+    native: dict[str, dict] = {}
+    functions: list[dict[str, Any]] = []
+    for t in tools:
+        if not isinstance(t, dict):
+            continue
+        ttype = str(t.get("type", "function"))
+        if ttype in _NATIVE_TOOL_ALIASES:
+            native[_NATIVE_TOOL_ALIASES[ttype]] = {}
+        else:
+            functions.append(t)
+    if body.get("web_search") or isinstance(body.get("web_search_options"), dict):
+        native["googleSearch"] = {}
+    if body.get("url_context"):
+        native["urlContext"] = {}
+    if body.get("code_execution"):
+        native["codeExecution"] = {}
+    return [{k: v} for k, v in native.items()], functions
 
 
 def headers(account: Auth | None = None) -> dict[str, str]:
@@ -1458,11 +1493,55 @@ def _extract_candidates(payload: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def _candidate_text(candidate: dict[str, Any]) -> str:
+    """Texto del candidato. Además de `text`, renderiza a markdown los parts que devuelven
+    las tools nativas: executableCode (código que corrió), codeExecutionResult (salida)
+    e inlineData (imagen generada -> data URI)."""
     try:
-        parts = candidate.get("content", {}).get("parts", [])
-        return "".join(p.get("text", "") for p in parts if isinstance(p, dict))
+        out: list[str] = []
+        for p in candidate.get("content", {}).get("parts", []):
+            if not isinstance(p, dict):
+                continue
+            if p.get("thought"):
+                continue
+            if "text" in p:
+                out.append(p.get("text", ""))
+            elif "executableCode" in p:
+                ec = p["executableCode"] or {}
+                lang = str(ec.get("language", "")).lower() or "python"
+                out.append(f"\n```{lang}\n{ec.get('code', '')}\n```\n")
+            elif "codeExecutionResult" in p:
+                cr = p["codeExecutionResult"] or {}
+                out.append(f"\n```\n{cr.get('output', '')}\n```\n")
+            elif "inlineData" in p:
+                d = p["inlineData"] or {}
+                mime = d.get("mimeType", "application/octet-stream")
+                if mime.startswith("image/"):
+                    out.append(f"\n![image](data:{mime};base64,{d.get('data', '')})\n")
+        return "".join(out)
     except Exception:
         return ""
+
+
+def _candidate_extras(candidate: dict[str, Any]) -> dict[str, Any]:
+    """Campos extra (no-OpenAI) para clientes que los quieran: citations del grounding e imágenes."""
+    extras: dict[str, Any] = {}
+    gm = candidate.get("groundingMetadata") or {}
+    if gm:
+        cites = []
+        for ch in gm.get("groundingChunks", []) or []:
+            w = (ch or {}).get("web") or {}
+            if w.get("uri"):
+                cites.append({"url": w.get("uri"), "title": w.get("title")})
+        if cites:
+            extras["citations"] = cites
+        if gm.get("webSearchQueries"):
+            extras["search_queries"] = gm["webSearchQueries"]
+    imgs = [p["inlineData"] for p in candidate.get("content", {}).get("parts", [])
+            if isinstance(p, dict) and isinstance(p.get("inlineData"), dict)
+            and str(p["inlineData"].get("mimeType", "")).startswith("image/")]
+    if imgs:
+        extras["images"] = [{"mime_type": i.get("mimeType"), "b64_json": i.get("data")} for i in imgs]
+    return extras
 
 
 def _candidate_tool_calls(candidate: dict[str, Any]) -> list[dict[str, Any]]:
@@ -2469,6 +2548,7 @@ def chat_completions():
         message: dict[str, Any] = {"role": "assistant", "content": text or None}
         if tool_calls:
             message["tool_calls"] = tool_calls
+        message.update(_candidate_extras(candidate))
         choices.append({
             "index": idx,
             "message": message,

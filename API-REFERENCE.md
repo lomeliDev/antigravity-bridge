@@ -88,6 +88,27 @@ Modalidades soportadas por modelo: ver `supportedMimeTypes` en `GET /admin/model
 - Respuesta: `functionCall` → `tool_calls[{id, type:"function", function:{name, arguments(JSON string)}}]`, `finish_reason: "tool_calls"`. IDs se preservan entre turnos. ✅
 - Parallel tool calls: N `functionCall` parts → N `tool_calls` en el mismo mensaje.
 
+### 2.5b Tools nativas del backend (verificadas ✅)
+
+El backend de Antigravity acepta las tools nativas de Gemini aunque agy no las exponga. Se activan con vocabulario OpenAI o flags:
+
+| Activación (cualquiera) | Tool Gemini | Qué hace |
+|---|---|---|
+| `tools:[{"type":"web_search"}]` · `{"type":"web_search_preview"}` · `"web_search": true` · `"web_search_options": {}` | `googleSearch` | **Grounding con Google Search** — respuestas con datos actuales. El message trae `citations:[{url,title}]` y `search_queries` |
+| `tools:[{"type":"url_context"}]` · `"url_context": true` | `urlContext` | El modelo lee las URLs que aparezcan en el prompt |
+| `tools:[{"type":"code_execution"}]` · `{"type":"code_interpreter"}` · `"code_execution": true` | `codeExecution` | Ejecuta Python en el sandbox de Google; el código y su salida se renderizan como bloques markdown en `content` |
+
+Se pueden combinar con `function` tools en la misma request. Ejemplo:
+
+```json
+{"model":"gemini-3.8-flash-low","web_search":true,
+ "messages":[{"role":"user","content":"ultima version de opencode?"}]}
+```
+
+Imágenes generadas (modelos `*-image` con `responseModalities`): llegan como `![image](data:image/png;base64,...)` en `content` y además en `images:[{mime_type,b64_json}]`.
+
+No disponible en este backend: `embedContent` (404). `countTokens` existe pero con otro shape (pendiente).
+
 ### 2.6 `user` / sesiones
 
 - **No hay memoria server-side**: cada request es stateless; la conversación va completa en `messages`. Nada se comparte entre api_keys ni entre `user`s.
