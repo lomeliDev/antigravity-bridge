@@ -105,7 +105,9 @@ Se pueden combinar con `function` tools en la misma request. Ejemplo:
  "messages":[{"role":"user","content":"ultima version de opencode?"}]}
 ```
 
-Imágenes generadas (modelos `*-image` con `responseModalities`): llegan como `![image](data:image/png;base64,...)` en `content` y además en `images:[{mime_type,b64_json}]`.
+Las 3 verificadas en vivo vía el bridge (grounding con 6 citas, urlContext leyendo opencode.ai, codeExecution sumando primos = 76127). Las citas llegan como redirects `vertexaisearch.cloud.google.com/grounding-api-redirect/...` (abren el sitio real); con `BRIDGE_RESOLVE_CITATIONS=1` el bridge las resuelve a la URL final (HEAD, ~200 ms/cita, cacheado).
+
+**Imágenes generadas** (`gemini-3.1-flash-image`) ✅: llegan como `![image](data:image/jpeg;base64,...)` en `content` y además en `images:[{mime_type,b64_json}]`. No hace falta `responseModalities`.
 
 No disponible en este backend: `embedContent` (404). `countTokens` existe pero con otro shape (pendiente).
 
@@ -189,6 +191,7 @@ Gemini Flash/Pro comparten los buckets `gemini-*`; Claude y GPT-OSS comparten `3
 | `AGY_CLI_VERSION` / `AGY_CLI_CL` / `AGY_AUTH_METHOD` | 1.1.28 / 978129418 / consumer | User-Agent |
 | `AGY_CONSUMER_PROJECT` | aicode-consumers | fallback de `project` |
 | `BRIDGE_QUOTA_TTL` | 30 | cache de quota (s) |
+| `BRIDGE_RESOLVE_CITATIONS` | 0 | resolver redirects de citas del grounding a la URL real |
 
 ### `/v1/models` — metadata por modelo
 

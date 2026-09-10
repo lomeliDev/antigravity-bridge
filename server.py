@@ -1522,6 +1522,26 @@ def _candidate_text(candidate: dict[str, Any]) -> str:
         return ""
 
 
+RESOLVE_CITATIONS = os.environ.get("BRIDGE_RESOLVE_CITATIONS", "").lower() in ("1", "true", "yes")
+_REDIRECT_CACHE: dict[str, str] = {}
+
+
+def _resolve_redirect(url: str) -> str:
+    """Las citas del grounding llegan como vertexaisearch.../grounding-api-redirect/...; opcionalmente
+    las resolvemos al sitio real (HEAD, ~200ms). Cache en memoria."""
+    if "grounding-api-redirect" not in url:
+        return url
+    if url in _REDIRECT_CACHE:
+        return _REDIRECT_CACHE[url]
+    try:
+        r = requests.head(url, allow_redirects=True, timeout=5)
+        final = r.url or url
+    except Exception:
+        final = url
+    _REDIRECT_CACHE[url] = final
+    return final
+
+
 def _candidate_extras(candidate: dict[str, Any]) -> dict[str, Any]:
     """Campos extra (no-OpenAI) para clientes que los quieran: citations del grounding e imágenes."""
     extras: dict[str, Any] = {}
@@ -1533,6 +1553,9 @@ def _candidate_extras(candidate: dict[str, Any]) -> dict[str, Any]:
             if w.get("uri"):
                 cites.append({"url": w.get("uri"), "title": w.get("title")})
         if cites:
+            if RESOLVE_CITATIONS:
+                for c in cites:
+                    c["url"] = _resolve_redirect(c["url"])
             extras["citations"] = cites
         if gm.get("webSearchQueries"):
             extras["search_queries"] = gm["webSearchQueries"]
