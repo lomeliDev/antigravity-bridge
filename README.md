@@ -298,6 +298,11 @@ model_list:
 
 ## 🆕 Rama `dev` — sep 2026
 
+- **Swagger UI en `/docs`** y OpenAPI 3.1 en `/api/spec.yml` (`openapi.yaml`): todos los endpoints, parámetros, bodies, respuestas y schemas. Importable en Postman/LiteLLM/generadores de clientes.
+- **Tools nativas del backend**: `web_search` (grounding con Google, con `citations`), `url_context`, `code_execution` (sandbox), imágenes de salida (`gemini-3.1-flash-image`). Se activan con `tools:[{type:...}]` o flags en el body.
+- `/v1/models` con metadata real (contexto, max output, modalidades, thinking); `thinkingBudget` y `model_enum` reales del catálogo.
+- `reasoning_effort` → sufijo del modelo; `user` → sessionId determinista.
+
 - Protocolo del **Antigravity CLI 1.1.28** (`daily-cloudcode-pa`, UA del CLI, body `agent`, scope `aicode`). Ver `AGY-CLI-PROTOCOL.md`.
 - **Quota real de Google por cuenta**: `GET /v1/quota`, `GET /admin/accounts/<key>/quota`, `GET /admin/accounts?quota=1` (4 buckets: gemini/claude × weekly/5h, % usado + reset). Cache 30s (`BRIDGE_QUOTA_TTL`).
 - **Entrada multimodal**: además de `image_url`, acepta `input_audio` (OpenAI), `file` (`file_data` data-URI o `file_url`: PDF, texto, video, audio) y extensiones `video_url` / `audio_url`. Se mandan como `inlineData` al modelo (límite 50 MB).

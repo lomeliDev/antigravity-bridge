@@ -2073,10 +2073,36 @@ def index():
         "email": email,
         "project_id": project,
         "upstream": ASSIST_URL,
+        "docs": "/docs",
+        "openapi": "/api/spec.yml",
         "endpoints": ["/health", "/v1/models", "/v1/chat/completions", "/v1/usage", "/v1/quota",
                       "/admin/accounts", "/admin/accounts?quota=1", "/admin/accounts/<key>/quota",
                       "/admin/accounts/<key>/login", "/auth/login", "/login"],
     })
+
+
+@app.route("/api/spec.yml")
+@app.route("/openapi.yaml")
+def openapi_spec():
+    """OpenAPI 3.1 del bridge (openapi.yaml junto a server.py)."""
+    spec_path = Path(__file__).resolve().parent / "openapi.yaml"
+    if not spec_path.exists():
+        return jsonify({"error": "openapi.yaml not found"}), 404
+    return Response(spec_path.read_text(), mimetype="application/yaml")
+
+
+@app.route("/docs")
+def swagger_ui():
+    """Swagger UI apuntando a /api/spec.yml (assets desde cdnjs)."""
+    html = """<!doctype html><html><head><meta charset="utf-8"><title>Antigravity Bridge — API docs</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/swagger-ui/5.17.14/swagger-ui.min.css">
+<style>body{margin:0;background:#fafafa}.topbar{display:none}</style></head>
+<body><div id="swagger-ui"></div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/swagger-ui/5.17.14/swagger-ui-bundle.min.js"></script>
+<script>window.ui = SwaggerUIBundle({url: "/api/spec.yml", dom_id: "#swagger-ui", deepLinking: true,
+  persistAuthorization: true, tryItOutEnabled: true, displayRequestDuration: true});</script>
+</body></html>"""
+    return Response(html, mimetype="text/html")
 
 
 @app.route("/health")

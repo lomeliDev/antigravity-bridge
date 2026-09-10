@@ -1,0 +1,676 @@
+openapi: 3.1.0
+info:
+  title: Antigravity Bridge
+  version: 0.2.0-dev
+  description: |
+    Proxy OpenAI-compatible sobre el backend de Google Antigravity (`daily-cloudcode-pa.googleapis.com`).
+    Usa la suscripción Google AI (Pro/Ultra) de cada cuenta vía OAuth. Multi-cuenta: cada `Authorization: Bearer <api_key>`
+    selecciona una cuenta Google con su propia quota.
+
+    Extensiones sobre OpenAI: tools nativas del backend (`web_search`, `url_context`, `code_execution`), imágenes de salida,
+    `reasoning_effort` → effort del modelo, `user` → sesión determinista, quota real por cuenta.
+
+    Referencia en prosa: `API-REFERENCE.md`. Protocolo capturado: `AGY-CLI-PROTOCOL.md`.
+servers:
+  - url: http://127.0.0.1:52847
+    description: local
+tags:
+  - name: openai
+    description: Endpoints compatibles con la API de OpenAI
+  - name: quota
+    description: Quota real de Google por cuenta
+  - name: admin
+    description: Gestión de cuentas (protegido con BRIDGE_ADMIN_KEY)
+  - name: auth
+    description: Login OAuth de la cuenta por defecto
+  - name: system
+
+components:
+  securitySchemes:
+    apiKey:
+      type: http
+      scheme: bearer
+      description: "api_key de la cuenta (accounts.json) o BRIDGE_API_KEY. Opcional en single-account sin BRIDGE_API_KEY."
+    adminKey:
+      type: http
+      scheme: bearer
+      description: BRIDGE_ADMIN_KEY. Si no está definido, /admin/* es abierto.
+
+  schemas:
+    Error:
+      type: object
+      properties:
+        error:
+          oneOf:
+            - type: string
+            - type: object
+              properties:
+                message: { type: string }
+                type: { type: string, example: upstream_error }
+                code: { type: integer }
+
+    ContentPart:
+      oneOf:
+        - type: object
+          required: [type, text]
+          properties:
+            type: { const: text }
+            text: { type: string }
+        - type: object
+          required: [type, image_url]
+          properties:
+            type: { const: image_url }
+            image_url:
+              type: object
+              properties:
+                url: { type: string, description: "https://... o data:image/png;base64,..." }
+        - type: object
+          required: [type, input_audio]
+          properties:
+            type: { const: input_audio }
+            input_audio:
+              type: object
+              properties:
+                data: { type: string, description: base64 }
+                format: { type: string, enum: [wav, mp3, m4a, aac, ogg, opus, flac, webm, pcm16] }
+        - type: object
+          required: [type, file]
+          properties:
+            type: { const: file }
+            file:
+              type: object
+              description: PDF, texto, audio o video. `file_data` (data-URI) o `file_url`. Máx 50 MB.
+              properties:
+                file_data: { type: string, description: "data:application/pdf;base64,..." }
+                file_url: { type: string }
+                filename: { type: string }
+        - type: object
+          required: [type, video_url]
+          properties:
+            type: { const: video_url }
+            video_url: { type: object, properties: { url: { type: string } } }
+        - type: object
+          required: [type, audio_url]
+          properties:
+            type: { const: audio_url }
+            audio_url: { type: object, properties: { url: { type: string } } }
+
+    ToolCall:
+      type: object
+      properties:
+        id: { type: string, example: call_714ced03058d417598f4abd7 }
+        type: { const: function }
+        function:
+          type: object
+          properties:
+            name: { type: string }
+            arguments: { type: string, description: JSON string }
+
+    Message:
+      type: object
+      required: [role]
+      properties:
+        role: { type: string, enum: [system, user, assistant, tool, function] }
+        content:
+          oneOf:
+            - type: string
+            - type: "null"
+            - type: array
+              items: { $ref: "#/components/schemas/ContentPart" }
+        name: { type: string }
+        tool_calls:
+          type: array
+          items: { $ref: "#/components/schemas/ToolCall" }
+        tool_call_id: { type: string, description: "en mensajes role=tool" }
+
+    FunctionTool:
+      type: object
+      properties:
+        type: { const: function }
+        function:
+          type: object
+          required: [name]
+          properties:
+            name: { type: string }
+            description: { type: string }
+            parameters: { type: object, description: JSON Schema (se limpian campos que Gemini rechaza) }
+
+    NativeTool:
+      type: object
+      description: Tools nativas del backend (verificadas). Se pueden combinar con function tools.
+      properties:
+        type:
+          type: string
+          enum: [web_search, web_search_preview, google_search, url_context, url_fetch, code_execution, code_interpreter]
+
+    ChatCompletionRequest:
+      type: object
+      required: [model, messages]
+      properties:
+        model:
+          type: string
+          description: |
+            ID del catálogo (`GET /v1/models`). Gemini con effort horneado: `gemini-3.8-flash-low|medium|high`.
+            Se acepta prefijo `models/`. Con `reasoning_effort` puede ir sin sufijo.
+          example: gemini-3.8-flash-low
+        messages:
+          type: array
+          items: { $ref: "#/components/schemas/Message" }
+        stream: { type: boolean, default: false }
+        stream_options:
+          type: object
+          properties: { include_usage: { type: boolean } }
+        temperature: { type: number, default: 1.0 }
+        top_p: { type: number, default: 0.95 }
+        max_tokens: { type: integer, default: 8192, description: "capado al max_output_tokens del modelo" }
+        max_completion_tokens: { type: integer }
+        n: { type: integer, maximum: 8 }
+        seed: { type: integer }
+        stop:
+          oneOf: [ { type: string }, { type: array, items: { type: string } } ]
+        response_format:
+          type: object
+          properties:
+            type: { type: string, enum: [text, json_object, json_schema] }
+            json_schema: { type: object }
+        tools:
+          type: array
+          items:
+            oneOf:
+              - $ref: "#/components/schemas/FunctionTool"
+              - $ref: "#/components/schemas/NativeTool"
+        tool_choice:
+          oneOf:
+            - type: string
+              enum: [auto, none, required]
+            - type: object
+        reasoning_effort:
+          type: string
+          enum: [low, medium, high]
+          description: "→ sufijo del modelo (gemini-3.8-flash + high = gemini-3.8-flash-high). Ignorado en Claude/GPT."
+        thinking_budget:
+          type: integer
+          description: "Extensión. Fuerza thinkingConfig.thinkingBudget (default: valor real del catálogo; -1 = dinámico)."
+        include_thoughts:
+          type: boolean
+          default: false
+          description: Extensión. Pide al modelo incluir su razonamiento (no se expone aún en la respuesta).
+        web_search:
+          type: boolean
+          description: Extensión. Activa grounding con Google Search (= tools:[{type:web_search}]).
+        web_search_options:
+          type: object
+          description: Compat OpenAI. Cualquier objeto activa web_search.
+        url_context:
+          type: boolean
+          description: Extensión. El modelo lee las URLs del prompt.
+        code_execution:
+          type: boolean
+          description: Extensión. Sandbox Python de Google.
+        user:
+          type: string
+          description: |
+            Identificador de usuario final. Genera sessionId/conversation_id deterministas (sha256 api_key:user).
+            No hay memoria server-side; solo agrupa actividad y mejora el cache de prompt. Equivale al header X-Session-Id.
+        logprobs: { description: ignorado }
+        frequency_penalty: { description: ignorado }
+        presence_penalty: { description: ignorado }
+        logit_bias: { description: ignorado }
+
+    Citation:
+      type: object
+      properties:
+        url: { type: string, description: "redirect de Google; con BRIDGE_RESOLVE_CITATIONS=1 se resuelve al sitio real" }
+        title: { type: string }
+
+    ImageOut:
+      type: object
+      properties:
+        mime_type: { type: string, example: image/jpeg }
+        b64_json: { type: string }
+
+    ChatMessageOut:
+      type: object
+      properties:
+        role: { const: assistant }
+        content:
+          type: [string, "null"]
+          description: |
+            Texto. Con code_execution incluye bloques ```python (código) y ``` (salida).
+            Con modelos *-image incluye `![image](data:image/...;base64,...)`.
+        tool_calls:
+          type: array
+          items: { $ref: "#/components/schemas/ToolCall" }
+        citations:
+          type: array
+          description: Extensión (solo con web_search).
+          items: { $ref: "#/components/schemas/Citation" }
+        search_queries:
+          type: array
+          description: Extensión (solo con web_search). Queries que hizo Google.
+          items: { type: string }
+        images:
+          type: array
+          description: Extensión (solo modelos de imagen).
+          items: { $ref: "#/components/schemas/ImageOut" }
+
+    Usage:
+      type: object
+      properties:
+        prompt_tokens: { type: integer }
+        completion_tokens: { type: integer }
+        total_tokens: { type: integer, description: incluye thinking tokens cuando el modelo razona }
+
+    ChatCompletionResponse:
+      type: object
+      properties:
+        id: { type: string, example: chatcmpl-c71e19c29f73443d98a27769 }
+        object: { const: chat.completion }
+        created: { type: integer }
+        model: { type: string, description: ID resuelto (con sufijo de effort) }
+        choices:
+          type: array
+          items:
+            type: object
+            properties:
+              index: { type: integer }
+              message: { $ref: "#/components/schemas/ChatMessageOut" }
+              finish_reason: { type: string, enum: [stop, tool_calls, length] }
+        usage: { $ref: "#/components/schemas/Usage" }
+
+    ChatCompletionChunk:
+      type: object
+      description: "Cada evento SSE: `data: {chunk}`; termina con `data: [DONE]`."
+      properties:
+        id: { type: string }
+        object: { const: chat.completion.chunk }
+        created: { type: integer }
+        model: { type: string }
+        choices:
+          type: array
+          items:
+            type: object
+            properties:
+              index: { type: integer }
+              delta:
+                type: object
+                properties:
+                  role: { type: string }
+                  content: { type: string }
+                  tool_calls: { type: array, items: { $ref: "#/components/schemas/ToolCall" } }
+              finish_reason: { type: [string, "null"] }
+        usage: { $ref: "#/components/schemas/Usage" }
+
+    Model:
+      type: object
+      properties:
+        id: { type: string, example: gemini-3.8-flash-high }
+        object: { const: model }
+        owned_by: { type: string, example: google }
+        created: { type: integer }
+        display_name: { type: string, example: Gemini 3.8 Flash (High) }
+        context_window: { type: integer, example: 1048576 }
+        max_output_tokens: { type: integer, example: 65536 }
+        supports_thinking: { type: boolean }
+        supports_images: { type: boolean }
+        supports_video: { type: boolean }
+        input_modalities:
+          type: array
+          items: { type: string, enum: [text, image, audio, video, application] }
+        web_search: { type: boolean, description: el backend lo lista en webSearchModelIds }
+        image_generation: { type: boolean }
+        deprecated: { type: boolean }
+        effort: { type: [string, "null"], enum: [low, medium, high, null] }
+
+    ModelMetadata:
+      allOf:
+        - $ref: "#/components/schemas/Model"
+        - type: object
+          properties:
+            metadata:
+              type: object
+              properties:
+                model_enum: { type: string, example: MODEL_PLACEHOLDER_M318 }
+                api_provider: { type: string, example: API_PROVIDER_GOOGLE_GEMINI }
+                provider: { type: string }
+                vertex_model_id: { type: [string, "null"], example: claude-opus-4-6@default }
+                thinking_budget: { type: [integer, "null"], description: "-1 = dinámico" }
+                min_thinking_budget: { type: [integer, "null"] }
+                supported_mime_types: { type: array, items: { type: string } }
+                audio_transcription: { type: boolean }
+                recommended: { type: boolean }
+                tag: { type: [string, "null"] }
+
+    QuotaBucket:
+      type: object
+      properties:
+        group: { type: string, example: Gemini Models }
+        window: { type: string, enum: [weekly, 5h] }
+        used_pct: { type: number, example: 1.1 }
+        remaining_pct: { type: number }
+        reset_at: { type: string, format: date-time }
+
+    Quota:
+      type: object
+      properties:
+        email: { type: string }
+        label: { type: string }
+        project: { type: string, example: aicode-consumers }
+        buckets:
+          type: object
+          properties:
+            gemini-weekly: { $ref: "#/components/schemas/QuotaBucket" }
+            gemini-5h: { $ref: "#/components/schemas/QuotaBucket" }
+            3p-weekly: { $ref: "#/components/schemas/QuotaBucket", description: Claude + GPT-OSS }
+            3p-5h: { $ref: "#/components/schemas/QuotaBucket" }
+        gemini_weekly_used: { type: number }
+        gemini_5h_used: { type: number }
+        claude_weekly_used: { type: number }
+        claude_5h_used: { type: number }
+        fetched_at: { type: integer }
+
+    Account:
+      type: object
+      properties:
+        api_key: { type: string }
+        label: { type: string }
+        email: { type: [string, "null"] }
+        has_refresh_token: { type: boolean }
+        health: { type: object }
+        quota:
+          description: solo con ?quota=1
+          type: [object, "null"]
+          properties:
+            gemini_weekly_used: { type: number }
+            gemini_5h_used: { type: number }
+            claude_weekly_used: { type: number }
+            claude_5h_used: { type: number }
+            fetched_at: { type: integer }
+            error: { type: string }
+
+    Health:
+      type: object
+      properties:
+        status: { type: string, enum: [ok, needs_login, no_account] }
+        email: { type: [string, "null"] }
+        project_id: { type: [string, "null"] }
+        accounts: { type: integer }
+        credentials: { type: object }
+        health: { type: object }
+        rate_limiter: { type: object }
+        token_expires_at: { type: integer }
+
+    LoginStart:
+      type: object
+      properties:
+        auth_url: { type: string, description: abrir en el navegador }
+        state: { type: string }
+        expires_in: { type: integer, example: 120 }
+
+paths:
+  /:
+    get:
+      tags: [system]
+      summary: Info del bridge y lista de endpoints
+      responses:
+        "200": { description: ok }
+
+  /health:
+    get:
+      tags: [system]
+      summary: Estado (nunca 500)
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Health" }
+
+  /v1/models:
+    get:
+      tags: [openai]
+      summary: Catálogo de modelos (fetchAvailableModels, cache 1h) con metadata
+      parameters:
+        - in: query
+          name: cli
+          schema: { type: string, enum: ["1"] }
+          description: Solo los 14 modelos que muestra `agy models`
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  object: { const: list }
+                  data: { type: array, items: { $ref: "#/components/schemas/Model" } }
+
+  /v1/models/{model_id}:
+    get:
+      tags: [openai]
+      summary: Un modelo con metadata completa
+      parameters:
+        - in: path
+          name: model_id
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ModelMetadata" }
+        "404":
+          description: no existe
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+
+  /v1/chat/completions:
+    post:
+      tags: [openai]
+      summary: Chat (normal o streaming), tools, multimodal, tools nativas
+      security: [ { apiKey: [] }, {} ]
+      parameters:
+        - in: header
+          name: X-Session-Id
+          schema: { type: string }
+          description: Equivale a body.user
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ChatCompletionRequest" }
+            examples:
+              simple:
+                value: { model: gemini-3.8-flash-low, messages: [ { role: user, content: "responde unicamente: OK" } ] }
+              grounding:
+                value: { model: gemini-3.8-flash-low, web_search: true, messages: [ { role: user, content: "ultima version de opencode?" } ] }
+              tools:
+                value:
+                  model: gemini-3.8-flash-low
+                  messages: [ { role: user, content: "que clima hace en cuernavaca?" } ]
+                  tools: [ { type: function, function: { name: get_weather, parameters: { type: object, properties: { city: { type: string } } } } } ]
+              vision:
+                value:
+                  model: gemini-3.8-flash-high
+                  messages: [ { role: user, content: [ { type: text, text: "que ves?" }, { type: image_url, image_url: { url: "https://goghl.ai/images/logo.png" } } ] } ]
+              image_out:
+                value: { model: gemini-3.1-flash-image, messages: [ { role: user, content: "un gato azul minimalista" } ] }
+              effort:
+                value: { model: gemini-3.8-flash, reasoning_effort: high, messages: [ { role: user, content: "hola" } ] }
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ChatCompletionResponse" }
+            text/event-stream:
+              schema: { $ref: "#/components/schemas/ChatCompletionChunk" }
+        "400": { description: request inválido, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+        "401": { description: api_key inválida / sin cuenta }
+        "429": { description: rate limit / quota agotada (upstream) }
+        "502": { description: error upstream }
+
+  /v1/usage:
+    get:
+      tags: [openai]
+      summary: Contadores locales por modelo desde el arranque (no es la quota de Google)
+      responses:
+        "200": { description: ok }
+
+  /v1/quota:
+    get:
+      tags: [quota]
+      summary: Quota real de Google de la cuenta del request
+      security: [ { apiKey: [] }, {} ]
+      parameters:
+        - in: query
+          name: refresh
+          schema: { type: string, enum: ["1"] }
+          description: salta el cache (30 s)
+      responses:
+        "200":
+          description: ok
+          content: { application/json: { schema: { $ref: "#/components/schemas/Quota" } } }
+        "401": { description: sin cuenta }
+        "502": { description: upstream }
+
+  /v1/billing/subscription:
+    get:
+      tags: [openai]
+      summary: Stub para clientes (Hermes) que consultan suscripción
+      responses:
+        "200": { description: ok }
+
+  /admin/accounts:
+    get:
+      tags: [admin]
+      summary: Lista de cuentas
+      security: [ { adminKey: [] }, {} ]
+      parameters:
+        - in: query
+          name: quota
+          schema: { type: string, enum: ["1"] }
+          description: Agrega la quota real de Google de cada cuenta (1 request/cuenta, cacheada)
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/Account" } }
+    post:
+      tags: [admin]
+      summary: Crear cuenta
+      security: [ { adminKey: [] }, {} ]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [api_key]
+              properties:
+                api_key: { type: string, example: sk-cuenta-2 }
+                label: { type: string }
+                refresh_token: { type: string, description: opcional; si no, hacer login }
+      responses:
+        "200": { description: creada }
+
+  /admin/accounts/{api_key}:
+    delete:
+      tags: [admin]
+      summary: Borrar cuenta
+      security: [ { adminKey: [] }, {} ]
+      parameters:
+        - { in: path, name: api_key, required: true, schema: { type: string } }
+      responses:
+        "200": { description: borrada }
+        "404": { description: no existe }
+
+  /admin/accounts/{api_key}/login:
+    post:
+      tags: [admin]
+      summary: Iniciar OAuth para una cuenta → auth_url
+      security: [ { adminKey: [] }, {} ]
+      parameters:
+        - { in: path, name: api_key, required: true, schema: { type: string } }
+      responses:
+        "200":
+          description: ok
+          content: { application/json: { schema: { $ref: "#/components/schemas/LoginStart" } } }
+
+  /admin/accounts/{api_key}/quota:
+    get:
+      tags: [quota, admin]
+      summary: Quota real de Google de una cuenta
+      security: [ { adminKey: [] }, {} ]
+      parameters:
+        - { in: path, name: api_key, required: true, schema: { type: string } }
+        - { in: query, name: refresh, schema: { type: string, enum: ["1"] } }
+      responses:
+        "200":
+          description: ok
+          content: { application/json: { schema: { $ref: "#/components/schemas/Quota" } } }
+        "404": { description: cuenta no existe }
+        "409": { description: cuenta sin login }
+        "502": { description: upstream }
+
+  /admin/models/raw:
+    get:
+      tags: [admin]
+      summary: fetchAvailableModels crudo (metadata completa del backend)
+      security: [ { adminKey: [] }, {} ]
+      responses:
+        "200": { description: ok }
+
+  /auth/login:
+    post:
+      tags: [auth]
+      summary: Iniciar OAuth de la cuenta default (crea la cuenta si no existe)
+      responses:
+        "200":
+          description: ok
+          content: { application/json: { schema: { $ref: "#/components/schemas/LoginStart" } } }
+        "500": { description: config incompleta (CLIENT_ID/SECRET) }
+
+  /auth/login/manual:
+    post:
+      tags: [auth]
+      summary: Completar OAuth pegando la URL de redirect
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                redirect_url: { type: string, example: "http://localhost:51121/oauth-callback?code=...&state=..." }
+                code: { type: string }
+      responses:
+        "200": { description: autenticado }
+
+  /auth/login/status:
+    get:
+      tags: [auth]
+      summary: Estado del login en curso
+      responses:
+        "200": { description: ok }
+
+  /login:
+    get:
+      tags: [auth]
+      summary: Página web de login
+      responses:
+        "200": { description: html }
+
+  /api/spec.yml:
+    get:
+      tags: [system]
+      summary: Este documento (OpenAPI)
+      responses:
+        "200": { description: yaml }
+
+  /docs:
+    get:
+      tags: [system]
+      summary: Swagger UI
+      responses:
+        "200": { description: html }
