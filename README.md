@@ -48,9 +48,19 @@ chmod +x install.sh
 ./install.sh
 ```
 
-The installer handles Python venv, OAuth login (opens your browser), and installs the service. **One command.**
+The installer handles the Python venv, asks for the Antigravity OAuth client (see below), runs the OAuth login (opens your browser), writes `.env` and installs the service. **One command.**
 
-> No OpenCode, no `agy` CLI, no npm packages. Just Python + a Google account.
+> No OpenCode, no `agy` CLI required at runtime. Just Python + a Google AI Pro/Ultra account.
+
+**You need two values before installing** — Antigravity's public OAuth client id/secret. They are not in the repo
+(GitHub blocks commits containing them). Get them once from the `opencode-antigravity-auth` npm package:
+
+```bash
+npm pack opencode-antigravity-auth && tar xzf opencode-antigravity-auth-*.tgz
+grep -rho 'CLIENT_[A-Z]* = "[^"]*' package/
+```
+
+The installer prompts for them and stores them in `.env` (`ANTIGRAVITY_CLIENT_ID`, `ANTIGRAVITY_CLIENT_SECRET`).
 
 ---
 
@@ -60,13 +70,13 @@ A Flask bridge that uses **Google OAuth refresh_tokens** to access **Gemini Code
 
 ```
 ┌─────────────┐   OpenAI API     ┌────────────────────┐   HTTPS    ┌─────────────────────────┐
-│   Hermes    │ ────────────────► │  Antigravity       │ ─────────► │  cloudcode-pa.google    │
+│   Hermes    │ ────────────────► │  Antigravity       │ ─────────► │  daily-cloudcode-pa     │
 │  Open WebUI │  /v1/chat/...    │  Bridge :PORT       │  Bearer   │  Gemini · Claude · GPT  │
-│  LiteLLM    │                  │                     │  + OAuth  │  14 models              │
+│  LiteLLM    │                  │                     │  + OAuth  │  ~25 models             │
 └─────────────┘                  └────────────────────┘           └─────────────────────────┘
 ```
 
-**14 models** across 3 providers through a single bridge: Gemini (2.5, 3, 3.1, 3.5), Claude (Sonnet, Opus), GPT.
+**~25 models** across 3 providers through a single bridge: Gemini (2.5 → 3.8 Flash/Pro with low/medium/high effort, image), Claude (Sonnet 4.6, Opus 4.6), GPT-OSS — plus Google Search grounding, URL reading and code execution.
 
 ---
 
@@ -81,19 +91,30 @@ chmod +x install.sh
 
 What the installer does:
 
-1. Checks Python 3.10+ and creates a `.venv`.
-2. Installs `flask` + `requests`.
-3. **OAuth login** — opens your browser, you authorize Google, paste the redirect URL.
-4. Asks for port and optional API key.
-5. Installs a **systemd** (Linux) or **launchd** (macOS) service.
-6. Runs health + models + chat validation.
+1. Checks Python 3.10+ and creates a `.venv`, installs `flask` + `requests`.
+2. Asks for **`ANTIGRAVITY_CLIENT_ID` / `ANTIGRAVITY_CLIENT_SECRET`** (prefilled if already in `.env`).
+3. **OAuth login** (standalone PKCE, no server needed) — prints a Google link, you authorize, paste the redirect URL.
+   Or paste an existing refresh_token, or keep the one already in `.env`.
+4. Asks for port and optional client API key.
+5. Writes `.env` (preserving existing values) and the daemon files.
+6. Installs a **systemd** (Linux) or **launchd** (macOS) service and runs the smoke test:
+   `/health`, `/v1/models`, `/v1/chat/completions`, `/v1/quota`, `/docs`.
+
+Re-running `install.sh` is safe: it keeps your `.env` values and offers to keep the current token.
 
 ### Manual run
 
 ```bash
-source .env
-.venv/bin/python3 server.py --host 0.0.0.0 --port 52847
+.venv/bin/python3 server.py --host 0.0.0.0 --port 52847   # server.py loads .env by itself
 ```
+
+Then open `http://127.0.0.1:52847/docs` (Swagger UI).
+
+### Upgrading from the July version
+
+The backend now requires the OAuth scope `aicode`; refresh tokens created before Sep 2026 get `401`.
+After `git pull`: add `ANTIGRAVITY_CLIENT_ID/SECRET` to `.env`, delete `auth_cache/` and `accounts.json` (or the
+old `BRIDGE_REFRESH_TOKEN`), run `python3 auth-login.py`, restart.
 
 ---
 
@@ -146,13 +167,21 @@ Each account gets its own **access token cache** in `auth_cache/`, its own rate 
 |----------|---------|---------|
 | `HOST` | `0.0.0.0` | Listen host |
 | `PORT` | `52847` | Listen port |
-| `BRIDGE_REFRESH_TOKEN` | — | OAuth refresh_token (single-account mode) |
+| `BRIDGE_DEBUG` | `0` | `1` = full tracebacks + upstream request log (includes base64 images; keep `0` in prod) |
+| `BRIDGE_REFRESH_TOKEN` | — | OAuth refresh_token (single-account mode). Must have the `aicode` scope (re-login if created before Sep 2026) |
 | `BRIDGE_API_KEY` | — | Client API key (deprecated — use accounts.json for multi-account) |
 | `BRIDGE_ADMIN_KEY` | — | Protects `/admin/*` endpoints. If empty → open access (dev mode) |
 | `BRIDGE_ACCOUNTS_FILE` | `./accounts.json` | Path to multi-account config |
 | `BRIDGE_AUTH_CACHE_DIR` | `./auth_cache/` | Per-account token cache directory |
-| `ANTIGRAVITY_CLIENT_ID` | *(hardcoded)* | Google OAuth client ID |
-| `ANTIGRAVITY_CLIENT_SECRET` | *(hardcoded)* | Google OAuth client secret |
+| `ANTIGRAVITY_CLIENT_ID` | — | **Required.** Antigravity's OAuth client id (public; not in repo — see Quick install) |
+| `ANTIGRAVITY_CLIENT_SECRET` | — | **Required.** Antigravity's OAuth client secret (public, PKCE desktop client) |
+| `ANTIGRAVITY_ASSIST_URL` | `https://daily-cloudcode-pa.googleapis.com/v1internal` | Backend endpoint |
+| `AGY_CLI_VERSION` / `AGY_CLI_CL` / `AGY_AUTH_METHOD` | `1.1.28` / `978129418` / `consumer` | User-Agent fingerprint of the Antigravity CLI |
+| `AGY_CONSUMER_PROJECT` | `aicode-consumers` | `project` sent with consumer auth |
+| `BRIDGE_QUOTA_TTL` | `30` | Seconds to cache `/v1/quota` |
+| `BRIDGE_RESOLVE_CITATIONS` | `0` | Resolve grounding citation redirects to the real URL |
+
+`.env` is loaded by `server.py` itself — no `export`, no python-dotenv. See `.env.example`.
 
 ---
 
@@ -163,7 +192,7 @@ Protected by `BRIDGE_ADMIN_KEY` (set in `.env`). All admin calls require `Author
 ### Create an account
 
 ```bash
-curl -X POST http://127.0.0.1:52848/admin/accounts \
+curl -X POST http://127.0.0.1:52847/admin/accounts \
   -H "Authorization: Bearer <admin_key>" \
   -H "Content-Type: application/json" \
   -d '{"api_key": "sk-my-new-account", "label": "My New Account"}'
@@ -174,7 +203,7 @@ Response: `{"ok": true, "api_key": "sk-my-new-account"}`
 ### Start OAuth login for the new account
 
 ```bash
-curl -X POST http://127.0.0.1:52848/admin/accounts/sk-my-new-account/login \
+curl -X POST http://127.0.0.1:52847/admin/accounts/sk-my-new-account/login \
   -H "Authorization: Bearer <admin_key>"
 ```
 
@@ -182,7 +211,7 @@ Returns an `auth_url` — open it in your browser, authorize Google, and the bri
 
 ```bash
 # After authorizing in browser, copy the redirect URL and:
-curl -X POST http://127.0.0.1:52848/auth/login/manual \
+curl -X POST http://127.0.0.1:52847/auth/login/manual \
   -H "Content-Type: application/json" \
   -d '{"code": "..."}'
 ```
@@ -190,24 +219,24 @@ curl -X POST http://127.0.0.1:52848/auth/login/manual \
 ### List all accounts
 
 ```bash
-curl http://127.0.0.1:52848/admin/accounts \
+curl http://127.0.0.1:52847/admin/accounts \
   -H "Authorization: Bearer <admin_key>"
 ```
 
 ### Remove an account
 
 ```bash
-curl -X DELETE http://127.0.0.1:52848/admin/accounts/sk-my-new-account \
+curl -X DELETE http://127.0.0.1:52847/admin/accounts/sk-my-new-account \
   -H "Authorization: Bearer <admin_key>"
 ```
 
 ### Use the account
 
 ```bash
-curl http://127.0.0.1:52848/v1/chat/completions \
+curl http://127.0.0.1:52847/v1/chat/completions \
   -H "Authorization: Bearer sk-my-new-account" \
   -H "Content-Type: application/json" \
-  -d '{"model":"gemini-2.5-flash","messages":[{"role":"user","content":"hello"}]}'
+  -d '{"model":"gemini-3.8-flash-low","messages":[{"role":"user","content":"hello"}]}'
 ```
 
 ### Full flow from scratch
@@ -226,13 +255,15 @@ POST /auth/login/callback     → exchanges code for tokens
 
 ## 🔑 OAuth login
 
-### Interactive (browser)
+### Interactive (standalone, no server needed)
 
 ```bash
-python3 auth-login.py
+python3 auth-login.py                      # single-account: writes BRIDGE_REFRESH_TOKEN into .env
+python3 auth-login.py --bridge http://127.0.0.1:52847 --account sk-xxx   # multi-account, via a running bridge
 ```
 
-Opens your browser, captures the OAuth redirect on `localhost:51121`.
+Prints a Google link (PKCE), you authorize, paste the redirect URL (`localhost:51121` fails in the browser — that's fine, copy the URL).
+Needs `ANTIGRAVITY_CLIENT_ID/SECRET` in `.env`.
 
 ### Web UI
 
@@ -242,12 +273,12 @@ Open `http://YOUR_HOST:PORT/login` in your browser — dual mode (auto callback 
 
 ```bash
 # 1. Get auth URL
-curl -X POST http://YOUR_HOST:52848/auth/login
+curl -X POST http://YOUR_HOST:52847/auth/login
 
 # 2. Open the returned auth_url in a browser, authorize
 
 # 3. Copy the redirect URL and exchange:
-curl -X POST http://YOUR_HOST:52848/auth/login/manual \
+curl -X POST http://YOUR_HOST:52847/auth/login/manual \
   -H "Content-Type: application/json" \
   -d '{"code": "PASTE_FULL_REDIRECT_URL_HERE"}'
 ```
@@ -259,7 +290,7 @@ curl -X POST http://YOUR_HOST:52848/auth/login/manual \
 ### Hermes
 
 ```bash
-./scripts/add-to-hermes.sh gemini-2.5-flash antigravity-bridge
+./scripts/add-to-hermes.sh gemini-3.8-flash-low antigravity-bridge
 ```
 
 ### LiteLLM
@@ -268,29 +299,29 @@ Add to `litellm_config.yaml`:
 
 ```yaml
 model_list:
-  - model_name: gemini-2.5-flash
+  - model_name: gemini-3.8-flash-low
     litellm_params:
-      model: openai/gemini-2.5-flash
-      api_base: http://127.0.0.1:52848/v1
+      model: openai/gemini-3.8-flash-low
+      api_base: http://127.0.0.1:52847/v1
       api_key: sk-your-account-key
   - model_name: claude-sonnet-4-6
     litellm_params:
       model: openai/claude-sonnet-4-6
-      api_base: http://127.0.0.1:52848/v1
+      api_base: http://127.0.0.1:52847/v1
       api_key: sk-your-account-key
 ```
 
 ### Open WebUI
 
 1. Admin Panel → Settings → Connections → Add OpenAI API.
-2. URL: `http://YOUR_SERVER:52848/v1`
+2. URL: `http://YOUR_SERVER:52847/v1`
 3. Key: your account API key (from `accounts.json`).
 
 ### Generic OpenAI client
 
 | Field | Value |
 |-------|-------|
-| Base URL | `http://YOUR_SERVER:52848/v1` |
+| Base URL | `http://YOUR_SERVER:52847/v1` |
 | API key | Account key (`sk-...`) from `accounts.json` |
 | Models | Fetched via `GET /v1/models` |
 
@@ -353,7 +384,7 @@ model_list:
 ## 🧪 API quick tests
 
 ```bash
-BASE=http://127.0.0.1:52848
+BASE=http://127.0.0.1:52847
 
 # Health
 curl -s "$BASE/health" | jq
@@ -364,7 +395,7 @@ curl -s "$BASE/v1/models" | jq '.data[].id'
 # Chat (no key, single-account mode)
 curl -s "$BASE/v1/chat/completions" \
   -H "Content-Type: application/json" \
-  -d '{"model":"gemini-2.5-flash","messages":[{"role":"user","content":"hi"}]}' | jq
+  -d '{"model":"gemini-3.8-flash-low","messages":[{"role":"user","content":"hi"}]}' | jq
 
 # Chat (with account key, multi-account mode)
 curl -s "$BASE/v1/chat/completions" \
@@ -375,7 +406,7 @@ curl -s "$BASE/v1/chat/completions" \
 # Streaming
 curl -N "$BASE/v1/chat/completions" \
   -H "Content-Type: application/json" \
-  -d '{"model":"gemini-2.5-flash","stream":true,"messages":[{"role":"user","content":"tell me a joke"}]}'
+  -d '{"model":"gemini-3.8-flash-low","stream":true,"messages":[{"role":"user","content":"tell me a joke"}]}'
 
 # Usage
 curl -s "$BASE/v1/usage" | jq
@@ -383,7 +414,7 @@ curl -s "$BASE/v1/usage" | jq
 # Vision (image URL)
 curl -s "$BASE/v1/chat/completions" \
   -H "Content-Type: application/json" \
-  -d '{"model":"gemini-2.5-flash","messages":[{"role":"user","content":[{"type":"text","text":"What do you see?"},{"type":"image_url","image_url":{"url":"https://example.com/photo.jpg"}}]}]}' | jq
+  -d '{"model":"gemini-3.8-flash-low","messages":[{"role":"user","content":[{"type":"text","text":"What do you see?"},{"type":"image_url","image_url":{"url":"https://example.com/photo.jpg"}}]}]}' | jq
 ```
 
 ---
@@ -392,7 +423,10 @@ curl -s "$BASE/v1/chat/completions" \
 
 | Problem | Solution |
 |---------|----------|
-| Bridge fails to start | Run manually: `source .env && .venv/bin/python3 server.py` |
+| Bridge fails to start | Run manually with `BRIDGE_DEBUG=1 .venv/bin/python3 server.py` and read the traceback |
+| `401 UNAUTHENTICATED` from Google | Refresh token without the `aicode` scope (pre-Sep-2026) or stale. Re-run `python3 auth-login.py`. Check: `curl "https://oauth2.googleapis.com/tokeninfo?access_token=<token>"` must list `auth/aicode` |
+| `/auth/login` → `CLIENT_ID/SECRET are empty` | Put `ANTIGRAVITY_CLIENT_ID/SECRET` in `.env` (see Quick install) |
+| `400 INVALID_ARGUMENT` on chat | Google changed the request shape. Follow `docs/reverse-engineering.md` to re-capture and diff |
 | `Missing OAuth credentials` | Account has no refresh_token. Run OAuth login for that account. |
 | `401 Invalid API key` | The account key doesn't match any in `accounts.json`. Check with `GET /admin/accounts`. |
 | `invalid_grant` from Google | Token revoked. The bridge auto-clears it. Run login again. |
