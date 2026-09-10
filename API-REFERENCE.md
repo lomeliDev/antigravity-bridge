@@ -71,7 +71,10 @@ Modalidades soportadas por modelo: ver `supportedMimeTypes` en `GET /admin/model
 | `seed` | `seed` | |
 | `stop` (string o lista) | `stopSequences` | |
 | `response_format` `json_object` / `json_schema` | `responseMimeType: application/json` (+ `responseSchema`) | |
-| `reasoning_effort` | → sufijo del modelo + `thinkingConfig.thinkingBudget` | low=1000 (capturado), medium=8000, high=32000 (placeholders, `AGY_THINKING_BUDGET`) |
+| `reasoning_effort` | → sufijo del modelo | el budget sale del catálogo (ver abajo) |
+| (automático) | `thinkingConfig.thinkingBudget` | **valor real por modelo** desde `fetchAvailableModels.thinkingBudget` (`-1` = dinámico en los Gemini `-high`; `1024` fijo en Claude); fallback tabla `AGY_THINKING_BUDGET` |
+| (automático) | `labels.model_enum` | desde el catálogo (`MODEL_PLACEHOLDER_Mxx`) |
+| (automático) | `maxOutputTokens` cap | se capa al `maxOutputTokens` real del modelo |
 | `thinking_budget` (extra) | `thinkingConfig.thinkingBudget` | fuerza el budget exacto |
 | `include_thoughts` (extra) | `thinkingConfig.includeThoughts` | default false |
 | `stream` | endpoint `:streamGenerateContent?alt=sse` vs `:generateContent` | ✅ ambos |
@@ -166,10 +169,12 @@ Gemini Flash/Pro comparten los buckets `gemini-*`; Claude y GPT-OSS comparten `3
 | `AGY_CONSUMER_PROJECT` | aicode-consumers | fallback de `project` |
 | `BRIDGE_QUOTA_TTL` | 30 | cache de quota (s) |
 
+### `/v1/models` — metadata por modelo
+
+Cada entrada trae, además de `id`/`owned_by`: `display_name`, `context_window` (1M en Gemini 3.x Flash, 250k en Claude), `max_output_tokens`, `supports_thinking/images/video`, `input_modalities` (`text/image/audio/video/application`), `web_search` (el backend marca qué modelos soportan búsqueda), `image_generation`, `deprecated`, `effort`. `GET /v1/models/<id>` agrega `metadata` completa (mime types, enum, vertex id, budgets).
+
 ## 7. Pendientes conocidos
 
-- `thinkingBudget` real de medium/high (capturar con mitmproxy; hoy 8000/32000 placeholders).
-- `labels.model_enum` no se manda (opcional, verificado).
 - Salida de imagen/audio (modelos `*-image`, tts): no mapeada al formato OpenAI.
+- Features del backend por sondear (Bloque C): `googleSearch`, `urlContext`, `codeExecution`, `responseModalities: IMAGE`, `:countTokens`, `:embedContent`.
 - `/auth/login/manual` opera sobre la última cuenta que inició login; en multi-cuenta hacer logins en serie.
-- `fetchAvailableModels` trae metadata por modelo que `/v1/models` aún no expone (contexto, límites) — ver `/admin/models/raw`.

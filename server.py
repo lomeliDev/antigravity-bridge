@@ -929,6 +929,18 @@ def _provider_to_owned_by(provider: str) -> str:
     return "google"
 
 
+_MODEL_META: dict[str, dict[str, Any]] = {}   # id -> metadata cruda del catálogo (ver fetch_available_models)
+
+
+def model_meta(model_id: str) -> dict[str, Any]:
+    if not _MODEL_META:
+        try:
+            fetch_available_models()
+        except Exception:
+            pass
+    return _MODEL_META.get(model_id, {})
+
+
 def fetch_available_models(account: Auth | None = None) -> list[dict[str, Any]]:
     """Fetch models from :fetchAvailableModels and return an OpenAI-compatible list."""
     global _MODEL_CACHE, _MODEL_CACHE_TS
@@ -945,6 +957,11 @@ def fetch_available_models(account: Auth | None = None) -> list[dict[str, Any]]:
         )
         r.raise_for_status()
         data = r.json()
+        web_search_ids = set(data.get("webSearchModelIds") or [])
+        image_gen_ids = set(data.get("imageGenerationModelIds") or [])
+        audio_ids = set(data.get("audioTranscriptionModelIds") or [])
+        deprecated_ids = set(data.get("deprecatedModelIds") or [])
+        _MODEL_META.clear()
         models: list[dict[str, Any]] = []
         for model_id, info in (data.get("models") or {}).items():
             if not info.get("displayName"):
@@ -955,11 +972,42 @@ def fetch_available_models(account: Auth | None = None) -> list[dict[str, Any]]:
             # Filter models that are known to be broken via this API.
             if model_id in _BROKEN_MODELS:
                 continue
+            mimes = list((info.get("supportedMimeTypes") or {}).keys())
+            modalities = sorted({m.split("/")[0] for m in mimes if "/" in m} | {"text"})
+            meta = {
+                "display_name": info.get("displayName"),
+                "provider": info.get("modelProvider"),
+                "api_provider": info.get("apiProvider"),
+                "model_enum": info.get("model"),               # MODEL_PLACEHOLDER_Mxx -> labels.model_enum
+                "vertex_model_id": info.get("vertexModelId"),
+                "context_window": info.get("maxTokens"),
+                "max_output_tokens": info.get("maxOutputTokens"),
+                "thinking_budget": info.get("thinkingBudget"),  # -1 = dinámico
+                "min_thinking_budget": info.get("minThinkingBudget"),
+                "supports_thinking": bool(info.get("supportsThinking")),
+                "supports_images": bool(info.get("supportsImages")),
+                "supports_video": bool(info.get("supportsVideo")),
+                "input_modalities": modalities,
+                "supported_mime_types": mimes,
+                "web_search": model_id in web_search_ids,
+                "image_generation": model_id in image_gen_ids,
+                "audio_transcription": model_id in audio_ids,
+                "deprecated": model_id in deprecated_ids,
+                "recommended": bool(info.get("recommended")),
+                "tag": info.get("tagTitle"),
+                "effort": _effort_from_model(model_id),
+            }
+            _MODEL_META[model_id] = meta
             models.append({
                 "id": model_id,
                 "object": "model",
                 "owned_by": _provider_to_owned_by(info.get("modelProvider", "")),
                 "created": int(datetime.datetime(2024, 1, 1, tzinfo=datetime.timezone.utc).timestamp()),
+                # extensión OpenAI: metadata útil para clientes/routers (LiteLLM la ignora si no la usa)
+                **{k: meta[k] for k in ("display_name", "context_window", "max_output_tokens",
+                                         "supports_thinking", "supports_images", "supports_video",
+                                         "input_modalities", "web_search", "image_generation",
+                                         "deprecated", "effort")},
             })
         models.sort(key=lambda m: m["id"])
         _MODEL_CACHE = models
@@ -1306,14 +1354,28 @@ def build_gemini_request(model: str, body: dict[str, Any], contents: list,
         "topP": body.get("top_p", 0.95),
     }
     # thinkingConfig como lo manda agy: el effort viene horneado en el id (-low/-medium/-high).
+    # Budget real por modelo desde el catálogo (fetchAvailableModels.thinkingBudget; -1 = dinámico),
+    # override con body.thinking_budget; fallback a la tabla por effort.
+    meta = model_meta(model_id)
     effort = _effort_from_model(model_id)
-    if effort:
+    if "thinking_budget" in body:
+        budget = int(body["thinking_budget"])
+    elif meta.get("thinking_budget") is not None:
+        budget = int(meta["thinking_budget"])
+    elif effort:
+        budget = AGY_THINKING_BUDGET.get(effort, 1000)
+    else:
+        budget = 0
+    if meta.get("supports_thinking") or effort or budget:
         generation_config["thinkingConfig"] = {
             "includeThoughts": bool(body.get("include_thoughts", False)),
-            "thinkingBudget": int(body.get("thinking_budget", AGY_THINKING_BUDGET.get(effort, 1000))),
+            "thinkingBudget": budget,
         }
     else:
         generation_config["thinkingConfig"] = {"includeThoughts": False, "thinkingBudget": 0}
+    # maxOutputTokens: capar al límite real del modelo si el catálogo lo conoce
+    if meta.get("max_output_tokens"):
+        generation_config["maxOutputTokens"] = min(generation_config["maxOutputTokens"], int(meta["max_output_tokens"]))
     if "seed" in body and isinstance(body["seed"], int):
         generation_config["seed"] = body["seed"]
     n = body.get("n", 1)
@@ -1348,6 +1410,7 @@ def build_gemini_request(model: str, body: dict[str, Any], contents: list,
             "sessionId": session_id,
             "labels": {
                 "last_step_index": "0",
+                **({"model_enum": meta["model_enum"]} if meta.get("model_enum") else {}),
                 "request_id": f"{traj_id}-0",
                 "trajectory_id": traj_id,
                 "used_claude": "true" if is_claude else "false",
@@ -2162,7 +2225,7 @@ def get_model(model_id: str):
     models = fetch_available_models()
     for m in models:
         if m["id"] == model_id:
-            return jsonify(m)
+            return jsonify({**m, "metadata": model_meta(model_id)})
     return jsonify({"error": {"message": "model not found", "type": "invalid_request_error"}}), 404
 
 
