@@ -296,20 +296,19 @@ model_list:
 
 ---
 
-## 🆕 Rama `dev` — sep 2026
+## 🆕 `dev` branch — Sep 2026
 
-- **Swagger UI en `/docs`** y OpenAPI 3.1 en `/api/spec.yml` (`openapi.yaml`): todos los endpoints, parámetros, bodies, respuestas y schemas. Importable en Postman/LiteLLM/generadores de clientes.
-- **Tools nativas del backend**: `web_search` (grounding con Google, con `citations`), `url_context`, `code_execution` (sandbox), imágenes de salida (`gemini-3.1-flash-image`). Se activan con `tools:[{type:...}]` o flags en el body.
-- `/v1/models` con metadata real (contexto, max output, modalidades, thinking); `thinkingBudget` y `model_enum` reales del catálogo.
-- `reasoning_effort` → sufijo del modelo; `user` → sessionId determinista.
-
-- Protocolo del **Antigravity CLI 1.1.28** (`daily-cloudcode-pa`, UA del CLI, body `agent`, scope `aicode`). Ver `AGY-CLI-PROTOCOL.md`.
-- **Quota real de Google por cuenta**: `GET /v1/quota`, `GET /admin/accounts/<key>/quota`, `GET /admin/accounts?quota=1` (4 buckets: gemini/claude × weekly/5h, % usado + reset). Cache 30s (`BRIDGE_QUOTA_TTL`).
-- **Entrada multimodal**: además de `image_url`, acepta `input_audio` (OpenAI), `file` (`file_data` data-URI o `file_url`: PDF, texto, video, audio) y extensiones `video_url` / `audio_url`. Se mandan como `inlineData` al modelo (límite 50 MB).
-- `GET /v1/models?cli=1` → solo los modelos del picker de `agy` (14); sin parámetro → todo `fetchAvailableModels` (~25).
-- Primer arranque sin cuenta: `/auth/login` crea la cuenta `default` (antes 500); `/health` responde `no_account`/`needs_login`.
-- `server.py` carga `.env` solo (sin python-dotenv). `BRIDGE_DEBUG=1` → tracebacks + log de requests upstream.
-- OAuth `ANTIGRAVITY_CLIENT_ID/SECRET` van en `.env` (GitHub bloquea commits que los contengan).
+- **Antigravity CLI 1.1.28 protocol** (`daily-cloudcode-pa`, CLI User-Agent, `agent` request body, `aicode` scope). See `AGY-CLI-PROTOCOL.md`.
+- **Swagger UI at `/docs`**, OpenAPI 3.1 at `/api/spec.yml` (`openapi.yaml`). Prose reference: `API-REFERENCE.md`.
+- **Native backend tools**: `web_search` (Google grounding with `citations`), `url_context`, `code_execution` (sandbox), image output (`gemini-3.1-flash-image`). Enable via `tools:[{type:...}]` or body flags.
+- **Real Google quota per account**: `GET /v1/quota`, `GET /admin/accounts/<key>/quota`, `GET /admin/accounts?quota=1`.
+- **Multimodal input**: `image_url`, `input_audio`, `file` (PDF/text/video/audio), `video_url`/`audio_url` → `inlineData`.
+- `/v1/models` with real metadata (context window, max output, modalities, thinking); real `thinkingBudget` + `model_enum` from the catalog. `?cli=1` = the 14 `agy models` entries.
+- `reasoning_effort` → model suffix; `user` → deterministic sessionId (no server-side memory).
+- **Login**: `auth-login.py` is standalone (PKCE, no server needed) and writes `BRIDGE_REFRESH_TOKEN` into `.env`; `--bridge URL --account KEY` for multi-account.
+- First run: `/auth/login` creates the default account (used to 500); `/health` returns `no_account`/`needs_login`.
+- `server.py` loads `.env` by itself. `BRIDGE_DEBUG=1` → tracebacks + upstream request log.
+- `ANTIGRAVITY_CLIENT_ID/SECRET` live in `.env` (GitHub blocks commits containing them); `install.sh` asks for them and preserves your existing `.env`.
 
 ## 📡 API reference
 

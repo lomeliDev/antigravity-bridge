@@ -45,9 +45,9 @@ from flask import Flask, Response, jsonify, request
 
 
 # ── .env loader (sin python-dotenv) ─────────────────────────────
-# `source .env` en la shell NO exporta las variables al proceso de Python a
-# menos que lleven `export`. Para no depender de eso, cargamos .env aquí
-# (sin pisar variables ya exportadas).
+# `source .env` in the shell does NOT export variables to the Python process
+# unless they carry `export`. To not depend on that, we load .env here
+# (never overriding variables already exported).
 def _load_dotenv(path: "Path") -> int:
     if not path.exists():
         return 0
@@ -71,7 +71,7 @@ def _load_dotenv(path: "Path") -> int:
 _DOTENV_LOADED = _load_dotenv(Path(__file__).resolve().parent / ".env")
 
 # ── Debug / logging ──────────────────────────────────────────────
-# BRIDGE_DEBUG=1  -> tracebacks completos en errores 500 y log de cada request upstream
+# BRIDGE_DEBUG=1  -> full tracebacks on 500s and a log line for every upstream request
 BRIDGE_DEBUG = os.environ.get("BRIDGE_DEBUG", "").lower() in ("1", "true", "yes", "on")
 logging.basicConfig(
     level=logging.DEBUG if BRIDGE_DEBUG else logging.INFO,
@@ -99,28 +99,28 @@ def _log_exc(where: str) -> str:
 # and are NOT confidential (desktop OAuth clients use PKCE for security).
 # Values default to the npm package's public constants; override via env vars
 # or .env file if Google ever rotates them.
-# OAuth client de Antigravity (el mismo que usa agy y el plugin
-# opencode-antigravity-auth). Van en .env — GitHub push-protection bloquea
-# cualquier commit que los contenga, así que NO se hardcodean aquí.
-# Valores: ver README ("OAuth client") o sacarlos del plugin:
+# Antigravity's OAuth client (the same one agy and the opencode-antigravity-auth
+# plugin use). They live in .env — GitHub push-protection blocks any commit
+# containing them, so they are NOT hardcoded here.
+# Values: see .env.example or extract them from the plugin:
 #   npm pack opencode-antigravity-auth && grep -rho 'CLIENT_[A-Z]* = "[^"]*' package/
 ANTIGRAVITY_CLIENT_ID = os.environ.get("ANTIGRAVITY_CLIENT_ID", "")
 ANTIGRAVITY_CLIENT_SECRET = os.environ.get("ANTIGRAVITY_CLIENT_SECRET", "")
 
-# --- Fingerprint del Antigravity CLI (capturado con mitmproxy, agy 1.1.28, sep 2026) ---
+# --- Antigravity CLI fingerprint (captured with mitmproxy, agy 1.1.28, Sep 2026) ---
 # UA:   antigravity/cli/1.1.28 (aidev_client; os_type=linux; arch=amd64; cl=978129418; auth_method=consumer)
-# Host: daily-cloudcode-pa.googleapis.com  (el IDE viejo usaba cloudcode-pa)
-# El CLI NO manda X-Goog-Api-Client.
+# Host: daily-cloudcode-pa.googleapis.com  (the old IDE used cloudcode-pa)
+# The CLI does NOT send X-Goog-Api-Client.
 AGY_CLI_VERSION = os.environ.get("AGY_CLI_VERSION", "1.1.28")
 AGY_CLI_CL = os.environ.get("AGY_CLI_CL", "978129418")
-AGY_AUTH_METHOD = os.environ.get("AGY_AUTH_METHOD", "consumer")   # consumer = cuenta Google AI (Ultra/Pro)
+AGY_AUTH_METHOD = os.environ.get("AGY_AUTH_METHOD", "consumer")   # consumer = Google AI account (Ultra/Pro)
 AGY_USER_AGENT = (
     f"antigravity/cli/{AGY_CLI_VERSION} (aidev_client; os_type=linux; arch=amd64; "
     f"cl={AGY_CLI_CL}; auth_method={AGY_AUTH_METHOD})"
 )
-# Project fijo que manda el CLI con auth consumer. loadCodeAssist sigue disponible para Workspace.
+# Fixed project the CLI sends with consumer auth. loadCodeAssist still applies for Workspace accounts.
 AGY_CONSUMER_PROJECT = os.environ.get("AGY_CONSUMER_PROJECT", "aicode-consumers")
-# thinkingBudget por sufijo de effort (low=1000 capturado; medium/high: ajustar tras capturar)
+# Fallback thinkingBudget per effort suffix (only used when the catalog has no value for the model)
 AGY_THINKING_BUDGET = {"low": 1000, "medium": 8000, "high": 32000}
 
 # Refresh token — set via BRIDGE_REFRESH_TOKEN env var or .env file.
@@ -554,7 +554,7 @@ TOKEN_URL = "https://oauth2.googleapis.com/token"
 # These are filtered from the /v1/models listing to avoid confusing users.
 _BROKEN_MODELS: frozenset[str] = frozenset({
     "gemini-2.5-pro",       # 503 "No capacity" — consistently unavailable
-    # gemini-3.1-pro-high: funcionaba en agy 1.1.28 con el body nuevo (thinkingConfig/requestType); re-habilitado
+    # gemini-3.1-pro-high: works on agy 1.1.28 with the new body (thinkingConfig/requestType); re-enabled
 })
 MODELS: list[dict[str, Any]] = [
     {"id": "gemini-2.5-pro",             "object": "model", "owned_by": "google", "created": 1735689600},
@@ -570,9 +570,9 @@ class Auth:
     """Holds OAuth credentials for a single Google account."""
 
     AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
-    # Scopes del Antigravity CLI 1.1.28 (tokeninfo del token real, sep 2026).
-    # "aicode" es NUEVO: sin él daily-cloudcode-pa responde 401. Un refresh_token viejo
-    # no lo trae -> hay que re-hacer login (nuevo consentimiento) tras actualizar.
+    # Scopes of the Antigravity CLI 1.1.28 (from tokeninfo of a real token, Sep 2026).
+    # "aicode" is NEW: without it daily-cloudcode-pa answers 401. An old refresh_token
+    # doesn't have it -> re-login (new consent) after updating.
     SCOPES = (
         "openid "
         "https://www.googleapis.com/auth/aicode "
@@ -763,7 +763,7 @@ class Auth:
         elif isinstance(proj, str):
             self._project_id = proj
         if not self._project_id:
-            # Cuentas consumer (Google AI Pro/Ultra): el CLI manda un project fijo.
+            # Consumer accounts (Google AI Pro/Ultra): the CLI sends a fixed project.
             self._project_id = AGY_CONSUMER_PROJECT
         self._persist()
         return self._project_id
@@ -862,7 +862,7 @@ def _save_account_token(a: Auth) -> None:
 
 
 # ── Global instances ──
-log.info(".env: %d vars cargadas | debug=%s | assist=%s | ua=%s",
+log.info(".env: %d vars loaded | debug=%s | assist=%s | ua=%s",
          _DOTENV_LOADED, BRIDGE_DEBUG, os.environ.get("ANTIGRAVITY_ASSIST_URL", "daily (default)"), AGY_USER_AGENT)
 accounts = AccountManager()
 _default_account: Auth | None = list(accounts._accounts.values())[0] if accounts._accounts else None
@@ -929,7 +929,7 @@ def _provider_to_owned_by(provider: str) -> str:
     return "google"
 
 
-_MODEL_META: dict[str, dict[str, Any]] = {}   # id -> metadata cruda del catálogo (ver fetch_available_models)
+_MODEL_META: dict[str, dict[str, Any]] = {}   # id -> raw catalog metadata (see fetch_available_models)
 
 
 def model_meta(model_id: str) -> dict[str, Any]:
@@ -982,7 +982,7 @@ def fetch_available_models(account: Auth | None = None) -> list[dict[str, Any]]:
                 "vertex_model_id": info.get("vertexModelId"),
                 "context_window": info.get("maxTokens"),
                 "max_output_tokens": info.get("maxOutputTokens"),
-                "thinking_budget": info.get("thinkingBudget"),  # -1 = dinámico
+                "thinking_budget": info.get("thinkingBudget"),  # -1 = dynamic
                 "min_thinking_budget": info.get("minThinkingBudget"),
                 "supports_thinking": bool(info.get("supportsThinking")),
                 "supports_images": bool(info.get("supportsImages")),
@@ -1003,7 +1003,7 @@ def fetch_available_models(account: Auth | None = None) -> list[dict[str, Any]]:
                 "object": "model",
                 "owned_by": _provider_to_owned_by(info.get("modelProvider", "")),
                 "created": int(datetime.datetime(2024, 1, 1, tzinfo=datetime.timezone.utc).timestamp()),
-                # extensión OpenAI: metadata útil para clientes/routers (LiteLLM la ignora si no la usa)
+                # OpenAI extension: metadata useful for clients/routers (LiteLLM ignores what it doesn't use)
                 **{k: meta[k] for k in ("display_name", "context_window", "max_output_tokens",
                                          "supports_thinking", "supports_images", "supports_video",
                                          "input_modalities", "web_search", "image_generation",
@@ -1022,15 +1022,15 @@ def fetch_available_models(account: Auth | None = None) -> list[dict[str, Any]]:
 
 
 # ============================================================
-# Quota real de Google (por cuenta)
+# Real Google quota (per account)
 # ============================================================
 _QUOTA_CACHE: dict[str, tuple[float, dict]] = {}
 QUOTA_CACHE_TTL = int(os.environ.get("BRIDGE_QUOTA_TTL", "30"))
 
 
 def fetch_quota(account: Auth, use_cache: bool = True) -> dict[str, Any]:
-    """Quota de Antigravity para una cuenta: 4 buckets (gemini/3p x weekly/5h) en % usado.
-    Mismo endpoint que usa el CLI (retrieveUserQuotaSummary)."""
+    """Antigravity quota for an account: 4 buckets (gemini/3p x weekly/5h) as used %.
+    Same endpoint the CLI uses (retrieveUserQuotaSummary)."""
     key = account.api_key or "default"
     now = time.time()
     if use_cache and key in _QUOTA_CACHE and now - _QUOTA_CACHE[key][0] < QUOTA_CACHE_TTL:
@@ -1061,7 +1061,7 @@ def fetch_quota(account: Auth, use_cache: bool = True) -> dict[str, Any]:
         "label": account.label,
         "project": account.get_project_id(),
         "buckets": buckets,
-        # atajos para dashboards
+        # dashboard shortcuts
         "gemini_weekly_used": buckets.get("gemini-weekly", {}).get("used_pct"),
         "gemini_5h_used": buckets.get("gemini-5h", {}).get("used_pct"),
         "claude_weekly_used": buckets.get("3p-weekly", {}).get("used_pct"),
@@ -1117,8 +1117,8 @@ def oai_content_to_gemini_parts(content: str | list[Any]) -> list[dict[str, Any]
                 parts.append({"inlineData": {"mimeType": mime, "data": ia["data"]}})
         elif itype in ("file", "video_url", "audio_url"):
             # OpenAI: {"type":"file","file":{"file_data":"data:application/pdf;base64,...","filename":"x.pdf"}}
-            #         {"type":"file","file":{"file_url":"https://..."}}   (extensión no estándar)
-            # Extensiones: {"type":"video_url","video_url":{"url":...}}, {"type":"audio_url","audio_url":{"url":...}}
+            #         {"type":"file","file":{"file_url":"https://..."}}   (non-standard extension)
+            # Extensions: {"type":"video_url","video_url":{"url":...}}, {"type":"audio_url","audio_url":{"url":...}}
             spec = item.get(itype, {}) or {}
             url = spec.get("file_data") or spec.get("file_url") or spec.get("url") or ""
             if isinstance(spec, str):
@@ -1151,7 +1151,7 @@ _EXT_MIME = {
 
 
 def _download_blob(url: str, hint_name: str = "", timeout: int = 60, max_bytes: int = 50 * 1024 * 1024) -> tuple[str, str]:
-    """(mime, base64) para data URIs o URLs http(s). Para PDF/audio/video/texto."""
+    """(mime, base64) for data URIs or http(s) URLs. For PDF/audio/video/text."""
     if url.startswith("data:"):
         header, _, b64 = url.partition(",")
         mime = header.split(";")[0].replace("data:", "")
@@ -1328,9 +1328,9 @@ def build_gemini_request(model: str, body: dict[str, Any], contents: list,
                          system_instr: str, account: Auth) -> dict[str, Any]:
     # Antigravity expects the model id without the "models/" prefix.
     model_id = model[7:] if model.startswith("models/") else model
-    # OpenAI `reasoning_effort` (low|medium|high): en Antigravity el effort va horneado en el id
-    # (gemini-3.8-flash-high). Si el cliente manda el modelo sin sufijo + reasoning_effort,
-    # lo componemos; si ya trae sufijo y además reasoning_effort, gana reasoning_effort.
+    # OpenAI `reasoning_effort` (low|medium|high): in Antigravity the effort is baked into the id
+    # (gemini-3.8-flash-high). If the client sends the model without suffix + reasoning_effort,
+    # we compose it; if it already has a suffix AND reasoning_effort, reasoning_effort wins.
     re_effort = str(body.get("reasoning_effort") or "").lower().strip()
     if re_effort in ("low", "medium", "high") and not _is_claude_model(model_id) and not model_id.startswith("gpt-"):
         base = model_id
@@ -1353,9 +1353,9 @@ def build_gemini_request(model: str, body: dict[str, Any], contents: list,
         "maxOutputTokens": max_output,
         "topP": body.get("top_p", 0.95),
     }
-    # thinkingConfig como lo manda agy: el effort viene horneado en el id (-low/-medium/-high).
-    # Budget real por modelo desde el catálogo (fetchAvailableModels.thinkingBudget; -1 = dinámico),
-    # override con body.thinking_budget; fallback a la tabla por effort.
+    # thinkingConfig as agy sends it: the effort is baked into the id (-low/-medium/-high).
+    # Real per-model budget from the catalog (fetchAvailableModels.thinkingBudget; -1 = dynamic),
+    # overridable with body.thinking_budget; fallback to the per-effort table.
     meta = model_meta(model_id)
     effort = _effort_from_model(model_id)
     if "thinking_budget" in body:
@@ -1373,7 +1373,7 @@ def build_gemini_request(model: str, body: dict[str, Any], contents: list,
         }
     else:
         generation_config["thinkingConfig"] = {"includeThoughts": False, "thinkingBudget": 0}
-    # maxOutputTokens: capar al límite real del modelo si el catálogo lo conoce
+    # maxOutputTokens: cap to the model's real limit when the catalog knows it
     if meta.get("max_output_tokens"):
         generation_config["maxOutputTokens"] = min(generation_config["maxOutputTokens"], int(meta["max_output_tokens"]))
     if "seed" in body and isinstance(body["seed"], int):
@@ -1382,9 +1382,9 @@ def build_gemini_request(model: str, body: dict[str, Any], contents: list,
     if isinstance(n, int) and n > 1:
         generation_config["candidateCount"] = min(n, 8)
     _apply_response_format(body, generation_config)
-    # `user` (OpenAI) / X-Session-Id -> sessionId y conversation_id deterministas por usuario.
-    # Antigravity no guarda estado entre requests (todo viaja en `contents`), pero un sessionId
-    # estable agrupa la actividad del mismo usuario y ayuda al cache de prompt del backend.
+    # `user` (OpenAI) / X-Session-Id -> deterministic per-user sessionId and conversation_id.
+    # Antigravity keeps no state between requests (everything travels in `contents`), but a stable
+    # sessionId groups the same user's activity and helps the backend's prompt cache.
     user_key = str(body.get("user") or request.headers.get("X-Session-Id", "") or "").strip()
     if user_key:
         import hashlib as _hl
@@ -1399,7 +1399,7 @@ def build_gemini_request(model: str, body: dict[str, Any], contents: list,
     is_non_gemini = not model_id.lower().startswith("gemini")
     req: dict[str, Any] = {
         "project": account.get_project_id(),
-        # Formato del CLI: agent/<conversation>/<epoch_ms>/<trajectory>/<step>
+        # CLI format: agent/<conversation>/<epoch_ms>/<trajectory>/<step>
         "requestId": f"agent/{conv_id}/{int(time.time()*1000)}/{traj_id}/1",
         "model": model_id,
         "userAgent": "antigravity",
@@ -1441,9 +1441,9 @@ def build_gemini_request(model: str, body: dict[str, Any], contents: list,
     return req
 
 
-# Tools nativas del backend de Antigravity (verificadas en vivo, sep 2026):
-#   googleSearch (grounding con Google), urlContext (leer URLs del prompt), codeExecution (sandbox).
-# Se activan con vocabulario OpenAI/Responses-API o con flags en el body.
+# Native tools of the Antigravity backend (verified live, Sep 2026):
+#   googleSearch (Google grounding), urlContext (read URLs from the prompt), codeExecution (sandbox).
+# Enabled with OpenAI/Responses-API vocabulary or body flags.
 _NATIVE_TOOL_ALIASES = {
     "web_search": "googleSearch", "web_search_preview": "googleSearch", "google_search": "googleSearch",
     "url_context": "urlContext", "url_fetch": "urlContext",
@@ -1452,7 +1452,7 @@ _NATIVE_TOOL_ALIASES = {
 
 
 def _split_native_tools(tools: list, body: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Separa tools OpenAI en (nativas Gemini, function tools). También lee body.web_search / web_search_options."""
+    """Split OpenAI tools into (Gemini native, function tools). Also reads body.web_search / web_search_options."""
     native: dict[str, dict] = {}
     functions: list[dict[str, Any]] = []
     for t in tools:
@@ -1493,9 +1493,9 @@ def _extract_candidates(payload: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def _candidate_text(candidate: dict[str, Any]) -> str:
-    """Texto del candidato. Además de `text`, renderiza a markdown los parts que devuelven
-    las tools nativas: executableCode (código que corrió), codeExecutionResult (salida)
-    e inlineData (imagen generada -> data URI)."""
+    """Candidate text. Besides `text`, renders to markdown the parts returned by native
+    tools: executableCode (code that ran), codeExecutionResult (output) and inlineData
+    (generated image -> data URI)."""
     try:
         out: list[str] = []
         for p in candidate.get("content", {}).get("parts", []):
@@ -1527,8 +1527,8 @@ _REDIRECT_CACHE: dict[str, str] = {}
 
 
 def _resolve_redirect(url: str) -> str:
-    """Las citas del grounding llegan como vertexaisearch.../grounding-api-redirect/...; opcionalmente
-    las resolvemos al sitio real (HEAD, ~200ms). Cache en memoria."""
+    """Grounding citations arrive as vertexaisearch.../grounding-api-redirect/...; optionally
+    resolve them to the real site (HEAD, ~200ms). In-memory cache."""
     if "grounding-api-redirect" not in url:
         return url
     if url in _REDIRECT_CACHE:
@@ -1543,7 +1543,7 @@ def _resolve_redirect(url: str) -> str:
 
 
 def _candidate_extras(candidate: dict[str, Any]) -> dict[str, Any]:
-    """Campos extra (no-OpenAI) para clientes que los quieran: citations del grounding e imágenes."""
+    """Extra (non-OpenAI) fields for clients that want them: grounding citations and images."""
     extras: dict[str, Any] = {}
     gm = candidate.get("groundingMetadata") or {}
     if gm:
@@ -1603,12 +1603,12 @@ def _model_has_effort_variants(base: str) -> bool:
     try:
         ids = {m["id"] for m in fetch_available_models()}
     except Exception:
-        return True  # sin catálogo, asumir que sí
+        return True  # no catalog -> assume yes
     return any(f"{base}-{e}" in ids for e in ("low", "medium", "high"))
 
 
 def _effort_from_model(model_id: str) -> str | None:
-    """agy hornea el effort en el id: gemini-3.8-flash-low -> 'low'."""
+    """agy bakes the effort into the id: gemini-3.8-flash-low -> 'low'."""
     for e in ("low", "medium", "high"):
         if model_id.endswith("-" + e):
             return e
@@ -2084,7 +2084,7 @@ def index():
 @app.route("/api/spec.yml")
 @app.route("/openapi.yaml")
 def openapi_spec():
-    """OpenAPI 3.1 del bridge (openapi.yaml junto a server.py)."""
+    """Bridge OpenAPI 3.1 (openapi.yaml next to server.py)."""
     spec_path = Path(__file__).resolve().parent / "openapi.yaml"
     if not spec_path.exists():
         return jsonify({"error": "openapi.yaml not found"}), 404
@@ -2093,7 +2093,7 @@ def openapi_spec():
 
 @app.route("/docs")
 def swagger_ui():
-    """Swagger UI apuntando a /api/spec.yml (assets desde cdnjs)."""
+    """Swagger UI pointing at /api/spec.yml (assets from cdnjs)."""
     html = """<!doctype html><html><head><meta charset="utf-8"><title>Antigravity Bridge — API docs</title>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/swagger-ui/5.17.14/swagger-ui.min.css">
 <style>body{margin:0;background:#fafafa}.topbar{display:none}</style></head>
@@ -2107,14 +2107,14 @@ def swagger_ui():
 
 @app.route("/health")
 def health():
-    # /health nunca debe dar 500: sin cuenta configurada responde "no_account"
-    # (es el estado normal justo después de instalar, antes del login).
+    # /health must never 500: with no account configured it answers "no_account"
+    # (the normal state right after install, before login).
     try:
         a = _get_account()
     except RuntimeError:
         return jsonify({
             "status": "no_account",
-            "message": "No hay cuenta configurada. Haz login: POST /auth/login (o python3 auth-login.py)",
+            "message": "No account configured. Log in: python3 auth-login.py (or POST /auth/login)",
             "accounts": len(accounts._accounts),
             "debug": BRIDGE_DEBUG,
         }), 200
@@ -2208,7 +2208,7 @@ def _check_admin() -> tuple | None:
 
 @app.route("/admin/accounts", methods=["GET"])
 def admin_list_accounts():
-    """Lista cuentas. ?quota=1 agrega la quota real de Google de cada una (1 request por cuenta, cacheada)."""
+    """List accounts. ?quota=1 adds each one's real Google quota (1 request per account, cached)."""
     if err := _check_admin():
         return jsonify(err[0]), err[1]
     result = accounts.list_accounts()
@@ -2230,7 +2230,7 @@ def admin_list_accounts():
 
 @app.route("/admin/models/raw", methods=["GET"])
 def admin_models_raw():
-    """JSON crudo de fetchAvailableModels (metadata completa por modelo: contexto, límites, modalidades...)."""
+    """Raw fetchAvailableModels JSON (full per-model metadata: context, limits, modalities...)."""
     if err := _check_admin():
         return jsonify(err[0]), err[1]
     try:
@@ -2245,7 +2245,7 @@ def admin_models_raw():
 
 @app.route("/admin/accounts/<api_key>/quota", methods=["GET"])
 def admin_account_quota(api_key: str):
-    """Quota real de Google para una cuenta (4 buckets con % usado y reset). ?refresh=1 salta el cache."""
+    """Real Google quota for one account (4 buckets with used % and reset). ?refresh=1 bypasses the cache."""
     if err := _check_admin():
         return jsonify(err[0]), err[1]
     a = accounts._accounts.get(api_key)
@@ -2261,7 +2261,7 @@ def admin_account_quota(api_key: str):
 
 @app.route("/v1/quota", methods=["GET"])
 def v1_quota():
-    """Quota real de Google para la cuenta del request (según su API key / default)."""
+    """Real Google quota for the request's account (by API key / default)."""
     try:
         a = _get_account()
     except RuntimeError as e:
@@ -2340,8 +2340,8 @@ def admin_login_account(api_key: str):
 
 @app.route("/v1/models")
 def list_models():
-    """Modelos disponibles (fetchAvailableModels del backend, cacheado).
-    ?cli=1 -> solo los 14 que muestra `agy models` (los que tienen effort horneado o son 3p)."""
+    """Available models (backend fetchAvailableModels, cached).
+    ?cli=1 -> only the 14 shown by `agy models` (effort-suffixed Gemini or 3p models)."""
     data = fetch_available_models()
     if request.args.get("cli") in ("1", "true"):
         data = [m for m in data if _effort_from_model(m["id"]) or _is_claude_model(m["id"]) or m["id"].startswith("gpt-")]
@@ -2697,9 +2697,9 @@ _login_account: Auth | None = None
 
 
 def _ensure_login_account() -> "Auth":
-    """Cuenta para hacer login. Si no existe ninguna (instalación nueva, sin
-    BRIDGE_REFRESH_TOKEN ni accounts.json) se crea una vacía 'default' para
-    que el flujo OAuth pueda arrancar; el refresh_token se guarda al terminar."""
+    """Account to log in with. If none exists (fresh install, no BRIDGE_REFRESH_TOKEN
+    nor accounts.json) an empty 'default' account is created so the OAuth flow can
+    start; the refresh_token is persisted at the end."""
     global _default_account
     try:
         return _get_account()
@@ -2719,7 +2719,7 @@ def auth_login_start():
     try:
         a = _ensure_login_account()
         if not a._client_id or not a._client_secret:
-            raise RuntimeError("ANTIGRAVITY_CLIENT_ID/SECRET vacíos — define en .env")
+            raise RuntimeError("ANTIGRAVITY_CLIENT_ID/SECRET are empty — set them in .env")
         a._auth_code = None
         a._auth_code_event = threading.Event()
         _login_account = a
