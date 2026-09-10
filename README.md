@@ -298,8 +298,8 @@ model_list:
 
 ## 🆕 `dev` branch — Sep 2026
 
-- **Antigravity CLI 1.1.28 protocol** (`daily-cloudcode-pa`, CLI User-Agent, `agent` request body, `aicode` scope). See `AGY-CLI-PROTOCOL.md`.
-- **Swagger UI at `/docs`**, OpenAPI 3.1 at `/api/spec.yml` (`openapi.yaml`). Prose reference: `API-REFERENCE.md`.
+- **Antigravity CLI 1.1.28 protocol** (`daily-cloudcode-pa`, CLI User-Agent, `agent` request body, `aicode` scope). See `docs/agy-cli-protocol.md`.
+- **Docs**: Swagger UI at `/docs`, OpenAPI 3.1 at `/api/spec.yml` (`openapi.yaml`); `docs/api-reference.md` (parameters & mapping), `docs/agy-cli-protocol.md` (captured protocol), `docs/reverse-engineering.md` (how to re-capture when Google changes something).
 - **Native backend tools**: `web_search` (Google grounding with `citations`), `url_context`, `code_execution` (sandbox), image output (`gemini-3.1-flash-image`). Enable via `tools:[{type:...}]` or body flags.
 - **Real Google quota per account**: `GET /v1/quota`, `GET /admin/accounts/<key>/quota`, `GET /admin/accounts?quota=1`.
 - **Multimodal input**: `image_url`, `input_audio`, `file` (PDF/text/video/audio), `video_url`/`audio_url` → `inlineData`.

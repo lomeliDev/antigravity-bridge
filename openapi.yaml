@@ -10,7 +10,7 @@ info:
     Extensions over OpenAI: native backend tools (`web_search`, `url_context`, `code_execution`), image output,
     `reasoning_effort` → model effort, `user` → deterministic session, real per-account quota.
 
-    Prose reference: `API-REFERENCE.md`. Captured protocol: `AGY-CLI-PROTOCOL.md`.
+    Prose reference: `docs/api-reference.md`. Captured protocol: `docs/agy-cli-protocol.md`.
 servers:
   - url: http://127.0.0.1:52847
     description: local
