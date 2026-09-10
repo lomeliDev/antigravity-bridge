@@ -295,21 +295,31 @@ curl -X POST http://YOUR_HOST:52847/auth/login/manual \
 
 ### LiteLLM
 
-Add to `litellm_config.yaml`:
+Register the bridge as an `openai/` provider. Effort goes in the model id (or via `reasoning_effort`); native tools via
+`web_search_options` (LiteLLM passes it through) or extra params.
 
 ```yaml
 model_list:
-  - model_name: gemini-3.8-flash-low
+  - model_name: gemini-3.8-flash          # what your apps call
     litellm_params:
-      model: openai/gemini-3.8-flash-low
+      model: openai/gemini-3.8-flash-low  # bridge id (effort baked in)
       api_base: http://127.0.0.1:52847/v1
-      api_key: sk-your-account-key
-  - model_name: claude-sonnet-4-6
+      api_key: sk-your-bridge-key         # BRIDGE_API_KEY or an accounts.json key
+  - model_name: gemini-3.8-flash-high
     litellm_params:
-      model: openai/claude-sonnet-4-6
+      model: openai/gemini-3.8-flash-high
       api_base: http://127.0.0.1:52847/v1
-      api_key: sk-your-account-key
+      api_key: sk-your-bridge-key
+  - model_name: claude-opus-via-google
+    litellm_params:
+      model: openai/claude-opus-4-6-thinking
+      api_base: http://127.0.0.1:52847/v1
+      api_key: sk-your-bridge-key
 ```
+
+Works with `stream`, `tools`/`tool_choice`, vision, `response_format`, `reasoning_effort`, `user`.
+LiteLLM's `drop_params` is not needed: unsupported params are ignored by the bridge with a log warning.
+For grounding from LiteLLM: `extra_body: {"web_search": true}` (or `web_search_options: {}`).
 
 ### Open WebUI
 
@@ -416,6 +426,13 @@ curl -s "$BASE/v1/chat/completions" \
   -H "Content-Type: application/json" \
   -d '{"model":"gemini-3.8-flash-low","messages":[{"role":"user","content":[{"type":"text","text":"What do you see?"},{"type":"image_url","image_url":{"url":"https://example.com/photo.jpg"}}]}]}' | jq
 ```
+
+---
+
+## 🔒 Security
+
+See `docs/security.md`. Short version: set `BRIDGE_API_KEY` (or accounts) **and** `BRIDGE_ADMIN_KEY`, bind `127.0.0.1`
+or use a tailnet/TLS proxy, keep `BRIDGE_DEBUG=0`. Client-supplied URLs are SSRF-guarded (private ranges blocked).
 
 ---
 

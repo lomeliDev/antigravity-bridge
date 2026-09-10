@@ -197,6 +197,8 @@ Each entry has, besides `id`/`owned_by`: `display_name`, `context_window` (1M on
 | `AGY_CONSUMER_PROJECT` | aicode-consumers | `project` fallback |
 | `BRIDGE_QUOTA_TTL` | 30 | quota cache (s) |
 | `BRIDGE_RESOLVE_CITATIONS` | 0 | resolve grounding citation redirects to the real URL |
+| `BRIDGE_ALLOW_PRIVATE_URLS` | 0 | allow fetching private/loopback URLs from `image_url`/`file_url` (SSRF guard off) |
+| `BRIDGE_MAX_IMAGE_BYTES` | 20971520 | cap for image downloads |
 
 ## 7. Login
 

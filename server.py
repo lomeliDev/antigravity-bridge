@@ -270,6 +270,10 @@ class AccountManager:
             }
         try:
             ACCOUNTS_FILE.write_text(json.dumps(data, indent=2))
+            try:
+                os.chmod(ACCOUNTS_FILE, 0o600)   # holds refresh tokens + client secret
+            except Exception:
+                pass
             ACCOUNTS_FILE.chmod(0o600)
         except Exception as e:
             print(f"[accounts] WARN saving: {e}", file=sys.stderr)
@@ -862,6 +866,9 @@ def _save_account_token(a: Auth) -> None:
 
 
 # ── Global instances ──
+if not BRIDGE_ADMIN_KEY:
+    log.warning("BRIDGE_ADMIN_KEY is not set: /admin/* is OPEN (lists emails, creates accounts, starts logins). "
+                "Set it in .env unless the bridge is bound to 127.0.0.1 or behind a firewall/tailnet.")
 log.info(".env: %d vars loaded | debug=%s | assist=%s | ua=%s",
          _DOTENV_LOADED, BRIDGE_DEBUG, os.environ.get("ANTIGRAVITY_ASSIST_URL", "daily (default)"), AGY_USER_AGENT)
 accounts = AccountManager()
@@ -1075,16 +1082,52 @@ def fetch_quota(account: Auth, use_cache: bool = True) -> dict[str, Any]:
 # ============================================================
 # Helpers
 # ============================================================
+# Client-supplied URLs (image_url / file_url / video_url) are fetched by the bridge.
+# Without a guard a client could make the bridge hit internal services (SSRF):
+# 127.0.0.1:<port> (this bridge's /admin, agy's local RPC), 169.254.169.254 (cloud
+# metadata), 10.x/172.16.x/192.168.x. Blocked unless BRIDGE_ALLOW_PRIVATE_URLS=1.
+ALLOW_PRIVATE_URLS = os.environ.get("BRIDGE_ALLOW_PRIVATE_URLS", "").lower() in ("1", "true", "yes")
+MAX_IMAGE_BYTES = int(os.environ.get("BRIDGE_MAX_IMAGE_BYTES", str(20 * 1024 * 1024)))
+
+
+def _assert_url_allowed(url: str) -> None:
+    import ipaddress
+    import socket
+    from urllib.parse import urlparse
+    u = urlparse(url)
+    if u.scheme not in ("http", "https"):
+        raise ValueError(f"unsupported URL scheme: {u.scheme!r}")
+    host = u.hostname or ""
+    if not host:
+        raise ValueError("URL without host")
+    if ALLOW_PRIVATE_URLS:
+        return
+    if host in ("localhost", "metadata.google.internal") or host.endswith(".internal") or host.endswith(".local"):
+        raise ValueError(f"blocked host: {host}")
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except socket.gaierror as e:
+        raise ValueError(f"cannot resolve {host}: {e}")
+    for info in infos:
+        ip = ipaddress.ip_address(info[4][0])
+        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast or ip.is_unspecified:
+            raise ValueError(f"blocked address for {host}: {ip} (set BRIDGE_ALLOW_PRIVATE_URLS=1 to allow)")
+
+
 def _download_image(url: str, timeout: int = 20) -> tuple[str, str]:
     """Return (mime_type, base64_data) for an image given by URL or data URI."""
     if url.startswith("data:"):
         header, _, b64 = url.partition(",")
         mime = header.split(";")[0].replace("data:", "")
         return mime or "image/png", b64
-    r = requests.get(url, headers={"User-Agent": "antigravity-bridge/0.1"}, timeout=timeout)
+    _assert_url_allowed(url)
+    r = requests.get(url, headers={"User-Agent": "antigravity-bridge/0.1"}, timeout=timeout, stream=True)
     r.raise_for_status()
+    data = r.raw.read(MAX_IMAGE_BYTES + 1)
+    if len(data) > MAX_IMAGE_BYTES:
+        raise ValueError(f"image too large (> {MAX_IMAGE_BYTES} bytes)")
     mime = r.headers.get("Content-Type", "image/jpeg").split(";")[0]
-    return mime, base64.b64encode(r.content).decode("ascii")
+    return mime, base64.b64encode(data).decode("ascii")
 
 
 def oai_content_to_gemini_parts(content: str | list[Any]) -> list[dict[str, Any]]:
@@ -1158,6 +1201,7 @@ def _download_blob(url: str, hint_name: str = "", timeout: int = 60, max_bytes: 
         return mime or "application/octet-stream", b64
     if not url:
         raise ValueError("empty file url")
+    _assert_url_allowed(url)
     r = requests.get(url, headers={"User-Agent": "antigravity-bridge/0.1"}, timeout=timeout, stream=True)
     r.raise_for_status()
     data = r.raw.read(max_bytes + 1)
@@ -2200,7 +2244,8 @@ def _check_admin() -> tuple | None:
         return None  # no admin key set → allow (for dev/single-user)
     auth_header = request.headers.get("Authorization", "")
     provided = auth_header.removeprefix("Bearer ").strip()
-    if provided != BRIDGE_ADMIN_KEY:
+    import hmac
+    if not hmac.compare_digest(provided.encode(), BRIDGE_ADMIN_KEY.encode()):
         return ({"error": {"message": "Admin access denied. Use Authorization: Bearer <admin_key>",
                            "type": "authentication_error"}}, 401)
     return None
