@@ -30,9 +30,11 @@ Each api_key = one Google account = its own quota and token cache. Requests for 
 
 ### 2.1 `model`
 
-- Catalog IDs (`GET /v1/models`). Gemini models carry the **effort in the id**: `gemini-3.8-flash-low|medium|high`. Claude and GPT have no suffix.
+- Catalog IDs (`GET /v1/models`). Older Gemini families carry the **effort in the id** (`gemini-3.6-flash-low|medium|high`); Claude and GPT have no suffix.
+- **Tiered families (3.8/3.7 and newer):** Google folded these into a single `-tiered` id with dynamic thinking effort (`gemini-3.8-flash-tiered`). Legacy suffixed ids (`gemini-3.8-flash-low|-medium|-high`) and the bare base (`gemini-3.8-flash`) are **aliased automatically** to the tiered id; the requested effort still drives the thinking budget (`low` → small fixed budget, `medium`/`high` → dynamic `-1`).
 - A `models/` prefix is tolerated and stripped.
-- **`reasoning_effort`** (`low|medium|high`, standard OpenAI): if you send `gemini-3.8-flash` without suffix, the bridge composes `gemini-3.8-flash-<effort>`; if you send a suffix AND `reasoning_effort`, `reasoning_effort` wins. Ignored for Claude/GPT. ✅
+- **`reasoning_effort`** (`low|medium|high`, standard OpenAI): on families with per-effort ids the bridge composes `gemini-3.6-flash-<effort>`; on tiered families it maps to the tiered id + budget. If you send a suffix AND `reasoning_effort`, `reasoning_effort` wins. Ignored for Claude/GPT. ✅
+- **Small `max_tokens`:** upstream rejects `thinkingBudget >= maxOutputTokens`. The bridge respects the client's cap: on Gemini it shrinks the budget (or disables thinking if it can't fit); on Claude (thinking mandatory) it raises `maxOutputTokens` to `budget+1024`.
 - `?cli=1` on `/v1/models` filters to the 14 models shown by `agy models`.
 
 ### 2.2 `messages` → Gemini `contents`
