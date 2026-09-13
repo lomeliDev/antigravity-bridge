@@ -150,7 +150,7 @@ components:
         model:
           type: string
           description: |
-            Catalog ID (`GET /v1/models`). Gemini models carry the effort in the id: `gemini-3.8-flash-low|medium|high`.
+            Catalog ID (`GET /v1/models`). Older Gemini families carry the effort in the id (`gemini-3.6-flash-low|medium|high`). Tiered families (3.8/3.7+) use a single `-tiered` id; legacy suffixed ids and bare bases are aliased automatically (e.g. `gemini-3.8-flash-low` → `gemini-3.8-flash-tiered`).
             `models/` prefix accepted. With `reasoning_effort` the suffix can be omitted.
           example: gemini-3.8-flash-low
         messages:
@@ -187,7 +187,7 @@ components:
         reasoning_effort:
           type: string
           enum: [low, medium, high]
-          description: "→ model suffix (gemini-3.8-flash + high = gemini-3.8-flash-high). Ignored for Claude/GPT."
+          description: "→ model suffix on per-effort families (gemini-3.6-flash + high = gemini-3.6-flash-high); on tiered families (3.8/3.7+) maps to the -tiered id + thinking budget. Ignored for Claude/GPT."
         thinking_budget:
           type: integer
           description: "Extension. Forces thinkingConfig.thinkingBudget (default: real catalog value; -1 = dynamic)."

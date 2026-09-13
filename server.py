@@ -925,6 +925,15 @@ def not_found(_e):
 _MODEL_CACHE: list[dict[str, Any]] | None = None
 _MODEL_CACHE_TS: float = 0.0
 _MODEL_CACHE_TTL: float = 300.0  # 5 minutes
+# Raw catalog ids (pre-filter), used to resolve ids hidden by the displayName filter.
+_RAW_MODEL_IDS: set[str] = set()
+def _tiered_display_name(model_id: str) -> str | None:
+    """Synthetic display name for hidden '-tiered' catalog entries so they
+    surface in /v1/models. Generic: works for any future tiered family."""
+    if not model_id.endswith("-tiered"):
+        return None
+    base = model_id[: -len("-tiered")]
+    return f"{base.replace('-', ' ').title()} (Tiered)"
 
 
 def _provider_to_owned_by(provider: str) -> str:
@@ -969,9 +978,15 @@ def fetch_available_models(account: Auth | None = None) -> list[dict[str, Any]]:
         audio_ids = set(data.get("audioTranscriptionModelIds") or [])
         deprecated_ids = set(data.get("deprecatedModelIds") or [])
         _MODEL_META.clear()
+        # Raw catalog ids BEFORE the displayName/hidden filters — some real,
+        # invocable models (e.g. gemini-3.8-flash-tiered) have no displayName
+        # and would otherwise be invisible to id resolution.
+        global _RAW_MODEL_IDS
+        _RAW_MODEL_IDS = set((data.get("models") or {}).keys())
         models: list[dict[str, Any]] = []
         for model_id, info in (data.get("models") or {}).items():
-            if not info.get("displayName"):
+            display = info.get("displayName") or _tiered_display_name(model_id)
+            if not display:
                 continue
             # Skip internal experiment IDs that are not public chat models.
             if model_id.startswith(("chat_", "tab_")):
@@ -982,7 +997,7 @@ def fetch_available_models(account: Auth | None = None) -> list[dict[str, Any]]:
             mimes = list((info.get("supportedMimeTypes") or {}).keys())
             modalities = sorted({m.split("/")[0] for m in mimes if "/" in m} | {"text"})
             meta = {
-                "display_name": info.get("displayName"),
+                "display_name": display,
                 "provider": info.get("modelProvider"),
                 "api_provider": info.get("apiProvider"),
                 "model_enum": info.get("model"),               # MODEL_PLACEHOLDER_Mxx -> labels.model_enum
@@ -1383,6 +1398,10 @@ def build_gemini_request(model: str, body: dict[str, Any], contents: list,
             base = model_id[: -(len(cur) + 1)]
         if _model_has_effort_variants(base):
             model_id = f"{base}-{re_effort}"
+    # AFTER the effort composition: legacy per-effort ids and bare base ids that
+    # Google folded into a single '-tiered' id (e.g. gemini-3.8-flash-low or
+    # gemini-3.8-flash -> gemini-3.8-flash-tiered + effort applied via budget).
+    model_id, tiered_effort = _tiered_alias(model_id)
 
     # Warn about OpenAI params that Antigravity does not support.
     _UNSUPPORTED_PARAMS = ("logprobs", "frequency_penalty", "presence_penalty", "logit_bias", "top_logprobs")
@@ -1401,15 +1420,48 @@ def build_gemini_request(model: str, body: dict[str, Any], contents: list,
     # Real per-model budget from the catalog (fetchAvailableModels.thinkingBudget; -1 = dynamic),
     # overridable with body.thinking_budget; fallback to the per-effort table.
     meta = model_meta(model_id)
-    effort = _effort_from_model(model_id)
+    effort = _effort_from_model(model_id) or tiered_effort or (
+        re_effort if re_effort in ('low', 'medium', 'high') else None)
+    catalog_tb = meta.get("thinking_budget")
+    is_tiered = model_id.endswith("-tiered")
     if "thinking_budget" in body:
         budget = int(body["thinking_budget"])
-    elif meta.get("thinking_budget") is not None:
-        budget = int(meta["thinking_budget"])
+    elif catalog_tb is not None and int(catalog_tb) >= 0:
+        budget = int(catalog_tb)
+    elif is_tiered:
+        # Tiered ids use dynamic effort upstream. The AGY_THINKING_BUDGET
+        # table values are unverified for these; only 'low' maps to a small
+        # fixed budget, medium/high stay dynamic (-1) and let Google decide.
+        budget = 1024 if effort == "low" else -1
     elif effort:
         budget = AGY_THINKING_BUDGET.get(effort, 1000)
+    elif catalog_tb is not None and int(catalog_tb) == -1:
+        budget = -1  # dynamic thinking: pass through untouched
     else:
         budget = 0
+    # Upstream rejects thinkingBudget >= maxOutputTokens (Anthropic: "`max_tokens`
+    # must be greater than `thinking.budget_tokens`"). Design choice: respect the
+    # client's max_tokens cap instead of silently raising it — shrink the budget
+    # to fit; if even a minimal budget doesn't fit, disable thinking (budget 0)
+    # on Gemini. Exception: Claude requires thinking, so there we raise the cap
+    # to the minimum that satisfies the upstream constraint.
+    is_claude_think = _is_claude_model(model_id)
+    if budget > 0 and generation_config["maxOutputTokens"] <= budget:
+        min_think = int(meta.get("min_thinking_budget") or 0)
+        if is_claude_think:
+            # Claude: thinking is mandatory upstream — raise the cap above the budget.
+            generation_config["maxOutputTokens"] = budget + 1024
+            if meta.get("max_output_tokens"):
+                generation_config["maxOutputTokens"] = min(
+                    generation_config["maxOutputTokens"], int(meta["max_output_tokens"]))
+        else:
+            # Gemini: shrink the budget to fit the client's cap, keep a small
+            # margin for the visible answer; disable thinking if it can't fit.
+            fit = generation_config["maxOutputTokens"] - 256
+            budget = fit if (fit >= max(min_think, 128)) else 0
+            print(f"[bridge] thinking budget shrunk/disabled to fit max_tokens="
+                  f"{generation_config['maxOutputTokens']} (budget={budget})",
+                  file=sys.stderr, flush=True)
     if meta.get("supports_thinking") or effort or budget:
         generation_config["thinkingConfig"] = {
             "includeThoughts": bool(body.get("include_thoughts", False)),
@@ -1657,6 +1709,38 @@ def _effort_from_model(model_id: str) -> str | None:
         if model_id.endswith("-" + e):
             return e
     return None
+
+
+def _tiered_alias(model_id: str) -> tuple[str, str | None]:
+    """Map legacy per-effort ids onto the catalog's '-tiered' ids.
+
+    Google migrated some families to a single '-tiered' id with dynamic
+    thinking effort (e.g. gemini-3.8-flash-low/-medium/-high disappeared from
+    fetchAvailableModels; only gemini-3.8-flash-tiered remains, with
+    thinkingBudget=-1). Old clients still request the per-effort ids and get
+    an upstream 404 "Requested entity was not found". When the requested id
+    is absent from the catalog but '<base>-tiered' exists, resolve to the
+    tiered id and return the intended effort so the budget table still
+    applies. Returns (model_id, effort_or_None) unchanged on any doubt
+    (catalog unavailable, id already valid, no tiered sibling).
+    """
+    effort = _effort_from_model(model_id)
+    base = model_id[: -(len(effort) + 1)] if effort else model_id
+    # Ensure the raw catalog is populated (best-effort; cached).
+    try:
+        fetch_available_models()
+    except Exception:
+        pass
+    ids = _RAW_MODEL_IDS
+    if not ids or model_id in ids:
+        return model_id, None  # no catalog -> pass through untouched
+    tiered = f"{base}-tiered"
+    if tiered in ids:
+        if effort or model_id != tiered:
+            print(f"[bridge] model alias: {model_id} -> {tiered}"
+                  f"{f' (effort={effort})' if effort else ''}", file=sys.stderr, flush=True)
+        return tiered, effort
+    return model_id, None
 
 
 # JSON Schema fields that Gemini Function Calling rejects outright.
