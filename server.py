@@ -291,7 +291,8 @@ class UsageTracker:
         self._total_errors: int = 0
         self._prompt_tokens: int = 0
         self._completion_tokens: int = 0
-        self._by_model: dict[str, dict[str, int]] = {}  # model -> {requests, errors, prompt, completion}
+        self._cached_tokens: int = 0   # prompt tokens served from the implicit cache (savings)
+        self._by_model: dict[str, dict[str, int]] = {}  # model -> {requests, errors, prompt, completion, cached}
         self._started_at: float = time.time()
 
     def record(
@@ -299,24 +300,27 @@ class UsageTracker:
         model: str,
         prompt_tokens: int = 0,
         completion_tokens: int = 0,
+        cached_tokens: int = 0,
         error: bool = False,
     ) -> None:
         with self._lock:
             self._total_requests += 1
             self._prompt_tokens += prompt_tokens
             self._completion_tokens += completion_tokens
+            self._cached_tokens += cached_tokens
             if error:
                 self._total_errors += 1
 
             if model not in self._by_model:
                 self._by_model[model] = {
                     "requests": 0, "errors": 0,
-                    "prompt_tokens": 0, "completion_tokens": 0,
+                    "prompt_tokens": 0, "completion_tokens": 0, "cached_tokens": 0,
                 }
             m = self._by_model[model]
             m["requests"] += 1
             m["prompt_tokens"] += prompt_tokens
             m["completion_tokens"] += completion_tokens
+            m["cached_tokens"] = m.get("cached_tokens", 0) + cached_tokens
             if error:
                 m["errors"] += 1
 
@@ -333,9 +337,14 @@ class UsageTracker:
                 "total_errors": self._total_errors,
                 "total_prompt_tokens": self._prompt_tokens,
                 "total_completion_tokens": self._completion_tokens,
+                "total_cached_tokens": self._cached_tokens,
+                # fraction of prompt tokens served from cache (0.0-1.0); higher = more savings
+                "cache_hit_rate": round(self._cached_tokens / self._prompt_tokens, 4) if self._prompt_tokens else 0.0,
                 "total_tokens": self._prompt_tokens + self._completion_tokens,
                 "by_model": {
-                    model: dict(stats) for model, stats in models_sorted
+                    model: {**dict(stats),
+                            "cache_hit_rate": round(stats.get("cached_tokens", 0) / stats["prompt_tokens"], 4) if stats.get("prompt_tokens") else 0.0}
+                    for model, stats in models_sorted
                 },
             }
 
@@ -1478,25 +1487,49 @@ def build_gemini_request(model: str, body: dict[str, Any], contents: list,
     if isinstance(n, int) and n > 1:
         generation_config["candidateCount"] = min(n, 8)
     _apply_response_format(body, generation_config)
-    # `user` (OpenAI) / X-Session-Id -> deterministic per-user sessionId and conversation_id.
-    # Antigravity keeps no state between requests (everything travels in `contents`), but a stable
-    # sessionId groups the same user's activity and helps the backend's prompt cache.
+    # Stable session identity so Antigravity's implicit prompt cache can hit.
+    # The backend groups a request into a "session" by conversation_id/sessionId; if these are
+    # random per request (as they were), every call looks like a brand-new session and the cache
+    # (cachedContentTokenCount) never kicks in -> the whole prompt is billed every time.
+    #
+    # Priority for the session key:
+    #   1. explicit `user` / X-Session-Id  (one stable session per end user / tenant)
+    #   2. otherwise, hash of the stable prefix of the request (system + all messages except the
+    #      last user turn). Same conversation -> same key -> cache hits, with NO client changes.
+    # Set BRIDGE_STABLE_SESSION=0 to force the old random behavior.
+    import hashlib as _hl
+    _stable = os.environ.get("BRIDGE_STABLE_SESSION", "1").lower() not in ("0", "false", "no")
     user_key = str(body.get("user") or request.headers.get("X-Session-Id", "") or "").strip()
     if user_key:
-        import hashlib as _hl
-        h = _hl.sha256(f"{account.api_key}:{user_key}".encode()).digest()
+        seed = f"user:{account.api_key}:{user_key}".encode()
+    elif _stable:
+        # prefix = everything the model caches: system prompt + conversation minus the last turn
+        msgs = body.get("messages") or []
+        prefix = msgs[:-1] if len(msgs) > 1 else msgs
+        try:
+            prefix_repr = json.dumps(prefix, sort_keys=True, ensure_ascii=False)
+        except Exception:
+            prefix_repr = str(prefix)
+        seed = f"prefix:{account.api_key}:{model_id}:{system_instr or ''}:{prefix_repr}".encode()
+    else:
+        seed = None
+    if seed is not None:
+        h = _hl.sha256(seed).digest()
         conv_id = str(uuid.UUID(bytes=h[:16]))
         session_id = str(int.from_bytes(h[16:24], "big", signed=True))
+        traj_id = str(uuid.UUID(bytes=h[8:24]))
     else:
         conv_id = str(uuid.uuid4())
         session_id = str(random.randint(-(2**63), 2**63 - 1))
-    traj_id = str(uuid.uuid4())
+        traj_id = str(uuid.uuid4())
     is_claude = _is_claude_model(model_id)
     is_non_gemini = not model_id.lower().startswith("gemini")
     req: dict[str, Any] = {
         "project": account.get_project_id(),
-        # CLI format: agent/<conversation>/<epoch_ms>/<trajectory>/<step>
-        "requestId": f"agent/{conv_id}/{int(time.time()*1000)}/{traj_id}/1",
+        # CLI format: agent/<conversation>/<epoch_ms>/<trajectory>/<step>.
+        # When the session is stable, keep the epoch component stable too (derived from conv_id)
+        # so the whole requestId is identical across repeats of the same prefix.
+        "requestId": f"agent/{conv_id}/{_stable_epoch(conv_id) if (user_key or _stable) else int(time.time()*1000)}/{traj_id}/1",
         "model": model_id,
         "userAgent": "antigravity",
         "requestType": "agent",
@@ -1689,6 +1722,13 @@ def extract_text(payload: dict[str, Any]) -> str:
     """Extract text from the first candidate (simple compatibility)."""
     cands = _extract_candidates(payload)
     return _candidate_text(cands[0]) if cands else ""
+
+
+def _stable_epoch(conv_id: str) -> int:
+    """A deterministic pseudo-epoch (ms) derived from conv_id, so a stable session keeps a stable
+    requestId across repeated prefixes (real epoch would change every call and break the cache)."""
+    import hashlib as _hl
+    return 1700000000000 + int.from_bytes(_hl.sha256(conv_id.encode()).digest()[:5], "big") % 1000000000
 
 
 def _is_claude_model(model_id: str) -> bool:
@@ -2639,12 +2679,14 @@ def chat_completions():
                             "prompt_tokens": stream_usage.get("promptTokenCount", 0),
                             "completion_tokens": stream_usage.get("candidatesTokenCount", 0),
                             "total_tokens": stream_usage.get("totalTokenCount", 0),
+                            "prompt_tokens_details": {"cached_tokens": stream_usage.get("cachedContentTokenCount", 0)},
                         }
                     # Record usage from stream metadata
                     _usage.record(
                         model=model,
                         prompt_tokens=stream_usage.get("promptTokenCount", 0),
                         completion_tokens=stream_usage.get("candidatesTokenCount", 0),
+                        cached_tokens=stream_usage.get("cachedContentTokenCount", 0),
                     )
                     yield f"data: {json.dumps(final)}\n\n"
                     yield "data: [DONE]\n\n"
@@ -2718,6 +2760,7 @@ def chat_completions():
         model=model,
         prompt_tokens=usage.get("promptTokenCount", 0),
         completion_tokens=usage.get("candidatesTokenCount", 0),
+        cached_tokens=usage.get("cachedContentTokenCount", 0),
     )
     choices: list[dict[str, Any]] = []
     for idx, candidate in enumerate(candidates):
@@ -2741,6 +2784,7 @@ def chat_completions():
         "usage": {
             "prompt_tokens": usage.get("promptTokenCount", 0),
             "completion_tokens": usage.get("candidatesTokenCount", 0),
+            "prompt_tokens_details": {"cached_tokens": usage.get("cachedContentTokenCount", 0)},
             "total_tokens": usage.get("totalTokenCount", 0),
         },
     })
